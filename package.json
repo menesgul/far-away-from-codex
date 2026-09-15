@@ -17,6 +17,10 @@
     {
       "command": "far-away-from-codex.toggleAlerts",
       "title": "Codex Alerts: Toggle"
+    },
+    {
+      "command": "far-away-from-codex.testNotification",
+      "title": "Far Away From Codex: Test Notification"
     }
   ]
 },

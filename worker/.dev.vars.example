@@ -1,0 +1,4 @@
+# Local development placeholders only. Copy to .dev.vars and replace the values.
+# Never commit .dev.vars or real Telegram credentials.
+TELEGRAM_BOT_TOKEN="replace-with-local-bot-token"
+TELEGRAM_WEBHOOK_SECRET="replace-with-local-webhook-secret"

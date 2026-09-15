@@ -1,0 +1,12 @@
+node_modules/
+coverage/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+src/**/*.js
+src/**/*.js.map
+test/**/*.js
+test/**/*.js.map
+vitest.config.js
+vitest.config.js.map

@@ -1,6 +1,6 @@
-# WORKPLAN.md — Codex Away Alerts
+# WORKPLAN.md — Far Away From Codex
 
-> Working name: **Codex Away Alerts**  
+> Product: **Far Away From Codex**
 > Goal: When the developer leaves the computer, enable one lightweight **Away Mode** in VS Code and receive only important Codex events on Telegram.
 
 ## 0. Product Goal and MVP Boundary
@@ -38,11 +38,12 @@ When **Codex Alerts: ON**, send concise Telegram notifications for:
   - `🔔 Codex Alerts: ON`
 - One click toggles Away Mode.
 - Commands:
-  - `Codex Alerts: Enable`
-  - `Codex Alerts: Disable`
-  - `Codex Alerts: Toggle`
-  - `Codex Alerts: Setup Telegram`
-  - `Codex Alerts: Test Notification`
+  - `Far Away From Codex: Enable`
+  - `Far Away From Codex: Disable`
+  - `Far Away From Codex: Toggle`
+  - `Far Away From Codex: Connect Telegram`
+  - `Far Away From Codex: Disconnect Telegram`
+  - `Far Away From Codex: Test Notification`
 
 ### 0.4 Explicit non-goals for V1
 Do **not** add:
@@ -51,13 +52,14 @@ Do **not** add:
 - approval from Telegram,
 - web dashboard,
 - user accounts,
-- hosted backend,
 - analytics,
-- payment,
+- payments or subscriptions,
 - WhatsApp,
+- multiple delivery providers,
+- notification history,
 - complex notification rules.
 
-The product must remain a small local-first VS Code extension.
+The product remains local-first for Codex processing. Its intentionally small hosted component is limited to anonymous installation authentication, Telegram pairing, and relaying final sanitized notification text through the official bot.
 
 ---
 
@@ -69,7 +71,7 @@ Create a public GitHub repository.
 Suggested structure:
 
 ```text
-codex-away-alerts/
+far-away-from-codex/
 ├─ src/
 │  ├─ extension.ts
 │  ├─ commands/
@@ -131,27 +133,72 @@ Do not move to external integrations until all are true:
 
 # 2. External Integration and Event Feasibility
 
-This phase must prove the external boundaries **before** the main implementation.
+This phase implements and proves external boundaries before the real Codex alert event features. Phase 2.1 is realized by implementation Slices B through E: Worker foundation, anonymous installation authentication, Telegram pairing, and test-notification relay. Complete Phase 2.1 before using Phase 2.2–2.7 to prove Codex event sources and local integration feasibility. Gate 2 permits and requires that Phase 2.1 work; it blocks the later Finished/Approval/Failure/MCP feature implementation until all integration sources are proven.
 
 ## 2.1 Telegram proof of concept
-Create a Telegram bot with BotFather and verify:
+The project owner creates one official Far Away From Codex bot with BotFather. End users never create bots or handle Telegram credentials.
+
+Prove delivery:
 
 ```text
 VS Code extension
         ↓
-Telegram Bot API
+Cloudflare Worker
+        ↓
+Official Far Away From Codex Telegram bot
         ↓
 Phone
 ```
 
-Requirements:
-- bot token must never be committed,
-- bot token must be stored using VS Code `SecretStorage`,
-- chat ID must be stored securely as well,
-- test notification must work from Extension Development Host.
+Prove pairing:
+
+```text
+VS Code extension
+        ↓ Worker pairing request
+Official Telegram deep link
+        ↓ user presses Start
+Telegram webhook
+        ↓
+Cloudflare Worker + D1 mapping
+        ↓
+Connected
+```
+
+Requirements to prove:
+- the official project bot exists,
+- the Cloudflare Worker runs and its D1 binding works,
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` are configured as Worker secrets and never committed,
+- `TELEGRAM_BOT_USERNAME` is configured as non-secret Worker configuration,
+- Telegram `setWebhook` registers the deployed `/v1/telegram/webhook` using the webhook secret as `secret_token`,
+- webhook configuration is verified before user pairing tests,
+- anonymous installation registration is lazy and returns a high-entropy credential once,
+- the extension stores that credential in VS Code `SecretStorage`,
+- an existing installation credential is reused instead of creating another record,
+- D1 stores only the installation credential hash,
+- one-time, short-lived Telegram deep-link pairing works,
+- the webhook secret is validated,
+- the webhook accepts only the exact pairing token from a private chat,
+- Telegram `chat_id` is discovered automatically and stored only server-side,
+- end users enter no bot token, chat ID, phone number, or account information,
+- the extension can observe pending/connected/expired pairing status,
+- Test Notification travels through the Worker and official bot,
+- notification bodies are neither persisted nor intentionally logged,
+- notification submission is attempted once without automatic retry,
+- disconnect and full installation reset/revocation are validated as distinct operations,
+- expired/used pairing cleanup and revoked/abandoned installation retention behavior are validated,
+- endpoint-specific body limits, polling limits, and abuse/rate controls are validated.
 
 ### Acceptance
-A `Codex Alerts: Test Notification` command produces a phone notification.
+A fresh Extension Development Host user can:
+
+1. run `Far Away From Codex: Connect Telegram`,
+2. click **Open Telegram**,
+3. press **Start** on the official bot,
+4. see **Connected** in VS Code,
+5. with Away Mode OFF, run `Far Away From Codex: Test Notification`,
+6. receive exactly one phone notification.
+
+This flow requires no BotFather interaction, bot token, chat ID, phone-number entry, or user account. Phase 2.1 remains incomplete until real deployed Worker and device acceptance passes.
 
 ---
 
@@ -186,7 +233,7 @@ VS Code extension
 The extension should copy/install a small stable bridge script under a user-level path such as:
 
 ```text
-~/.codex/codex-away-alerts/bridge.cjs
+~/.codex/far-away-from-codex/bridge.cjs
 ```
 
 The Codex hook definition should point at this stable path rather than a versioned VS Code Marketplace extension directory.
@@ -196,7 +243,7 @@ The bridge must:
 - discover the active extension loopback endpoint,
 - send the event locally,
 - exit quickly,
-- never contain Telegram credentials,
+- never contain the installation credential or Telegram credentials,
 - fail silently when the VS Code extension is not running.
 
 ---
@@ -352,7 +399,7 @@ Do not parse the unstable transcript format merely to obtain a pretty session na
 
 ## 2.8 Gate 2 — Integration Review
 
-Before application coding begins, create a short spike report containing:
+Before Codex event-feature implementation begins, create a short spike report containing:
 
 | Event | Source | Verified in IDE? | Useful fields | Reliability |
 |---|---|---:|---|---|
@@ -364,12 +411,23 @@ Before application coding begins, create a short spike report containing:
 | Session label | thread name / cwd / id |  |  |  |
 
 Do not move to Phase 3 until:
-- [ ] Telegram works,
+- [ ] official bot + Worker delivery works,
+- [ ] anonymous installation authentication is proven,
+- [ ] one-time pairing is proven,
+- [ ] Telegram webhook authentication is proven,
+- [ ] deployed webhook registration/configuration is verified,
+- [ ] automatic private-chat association is proven,
+- [ ] Test Notification reaches the phone through the backend,
+- [ ] the backend does not persist or intentionally log message bodies,
+- [ ] notification POST is attempted once without automatic retry,
+- [ ] disconnect/revocation strategy is proven,
 - [ ] Finished source is proven,
 - [ ] Approval source is proven,
 - [ ] failure strategy is explicitly decided,
 - [ ] session-label fallback is proven,
 - [ ] hook install/trust workflow is understood.
+
+Slices B through E are the implementation work required to complete Phase 2.1 and are explicitly allowed before Gate 2 passes. Gate 2 prevents proceeding into the real Codex event-feature slices—Finished, Approval, Failure, and MCP behavior—until both the backend/Telegram path and Codex event sources have been proven. Gate 2 remains open.
 
 ---
 
@@ -381,6 +439,7 @@ Implement:
 - status bar item,
 - configuration loading,
 - SecretStorage access,
+- BackendClient lifecycle,
 - local event receiver startup.
 
 ## 3.2 Away Mode state
@@ -399,9 +458,9 @@ Behavior:
 - send no Telegram notification.
 
 ### ON
-- process supported Codex events,
-- format notifications,
-- send Telegram messages.
+- process supported Codex events locally,
+- redact and format notifications locally,
+- relay final sanitized messages through the backend.
 
 Persist the user's preferred state across normal VS Code restarts only if testing shows that behavior is intuitive. Otherwise default to OFF for safety.
 
@@ -421,47 +480,65 @@ Click action:
 
 Optional tooltip:
 ```text
-Codex Away Alerts
+Far Away From Codex
 Click to enable/disable phone notifications.
 ```
 
 ---
 
-# 4. Telegram Configuration
+# 4. Telegram Connection
 
-## 4.1 Setup command
-`Codex Alerts: Setup Telegram`
+## 4.1 Connect command
+`Far Away From Codex: Connect Telegram`
 
-Collect:
-1. Bot Token
-2. Chat ID
+Flow:
+1. check VS Code `SecretStorage` for `farAway.installationCredential`,
+2. if missing, call `POST /v1/installations` and store the credential returned once,
+3. if present, reuse it and do not create another installation,
+4. request a short-lived, one-time pairing from the Worker,
+5. open the official bot deep link,
+6. let the user press **Start**,
+7. wait/check for `pending`, `connected`, or `expired` at a reasonable frequency,
+8. report **Telegram connected**.
 
-Store both in `SecretStorage`.
+Installation registration is lazy: installing or activating the extension alone creates no backend/D1 record.
 
-Never write them to:
-- `settings.json`,
-- logs,
-- hook files,
-- bridge runtime files,
-- repository files.
+The user never enters a bot token, Telegram chat ID, phone number, username, or account credential. The official bot token and webhook secret exist only as Worker secrets; the chat ID exists only in D1.
 
 ## 4.2 Test command
-`Codex Alerts: Test Notification`
+`Far Away From Codex: Test Notification`
 
 Example:
 
 ```text
-🔔 Codex Away Alerts
+🔔 Far Away From Codex
 Telegram notifications are working.
 ```
 
-## 4.3 Error handling
-Show a local VS Code error if:
-- token is invalid,
-- chat ID is invalid,
-- Telegram is unreachable.
+The extension sends this final sanitized text to `BackendClient`. The Worker looks up the paired chat ID, attempts exactly one message through the official bot, and does not persist the body. The extension must not automatically retry this notification POST.
 
-Do not expose the token in the error message.
+Test Notification is a setup/connection diagnostic and works independently of `Codex Alerts: ON/OFF`. It must send exactly one test message even when Away Mode is OFF, and fail clearly when Telegram is not connected or backend delivery fails. Away Mode controls only real Codex event notifications.
+
+## 4.3 Disconnect command
+`Far Away From Codex: Disconnect Telegram`
+
+Behavior:
+- authenticate with the anonymous installation credential,
+- clear the server-side Telegram chat association,
+- invalidate applicable pending pairings,
+- update local connection state,
+- leave the official bot token untouched.
+
+Resetting/revoking the anonymous installation credential is a separate recovery operation, conceptually `DELETE /v1/installation`. It invalidates the credential and pending pairings, clears the Telegram association, and makes that credential unusable. Disconnect keeps the installation credential valid; reset/revoke does not. There is no user-account deletion because no user account exists.
+
+## 4.4 Error handling
+Show a local VS Code error if:
+- registration or installation authentication fails,
+- pairing expires or is rejected,
+- the backend, D1, or Telegram is unavailable,
+- notification delivery fails.
+
+Do not expose installation credentials, pairing tokens, Telegram secrets, chat IDs, notification bodies, or raw backend/Telegram URLs in errors or logs.
 
 ---
 
@@ -608,28 +685,48 @@ Bridge:
 - attaches nonce,
 - POSTs hook payload to loopback.
 
-Telegram token remains inside VS Code SecretStorage.
+The anonymous installation credential remains inside VS Code SecretStorage and must never enter the bridge or runtime file.
 
 ## 7.3 Runtime file
 Suggested path:
 
 ```text
-~/.codex/codex-away-alerts/runtime.json
+~/.codex/far-away-from-codex/runtime.json
 ```
 
 Contents must never contain:
-- Telegram bot token,
+- anonymous installation credential,
+- Telegram bot token or webhook secret,
 - Telegram chat ID.
 
 Delete/stale-check on shutdown/startup.
 
 ## 7.4 Logs
 Never log:
-- Telegram token,
+- installation credentials or pairing tokens,
+- Telegram bot or webhook secrets,
+- Telegram chat IDs,
+- notification bodies,
 - full sensitive commands by default,
 - secrets found in tool payloads.
 
-Implement basic redaction for common secret patterns before notification/logging.
+Implement deterministic redaction and final formatting locally before calling the backend. Never transmit raw Codex events or raw tool payloads to the Worker.
+
+## 7.5 Hosted API security
+
+- use TLS/HTTPS only,
+- authenticate extension requests with a high-entropy installation bearer credential,
+- store only installation-credential hashes and pairing-token hashes in D1,
+- never place credentials in query strings, logs, repository files, or hook/bridge files,
+- validate the Telegram webhook secret,
+- protect unauthenticated `POST /v1/installations` with IP-level rate limiting/abuse controls and a bounded request body so it cannot create unlimited D1 records,
+- rate-limit `POST /v1/pairings` per installation and prevent unlimited active pairings,
+- require installation authentication for `GET /v1/pairings/:id` and enforce reasonable, non-aggressive polling,
+- rate-limit `POST /v1/notifications` per installation and enforce bounded message/body length,
+- validate the webhook secret before processing `POST /v1/telegram/webhook`, bound its body, and safely reject malformed/unsupported updates,
+- use bounded request timeouts and no infinite retry path,
+- make pairing tokens short-lived, exact-match, private-chat-only, and single-use,
+- keep V1 low-friction: no CAPTCHA, Turnstile, login, or account system without later evidence of abuse.
 
 ---
 
@@ -651,23 +748,90 @@ Tests:
 
 Review before Slice B.
 
-## 8.2 Slice B — Telegram
+## 8.2 Slice B — Worker foundation
 Code:
-- SecretStorage,
-- setup,
-- sender,
-- test notification.
+- separate Cloudflare Worker TypeScript project,
+- optional health route,
+- D1 binding and minimal migrations,
+- Worker secret strategy for `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`,
+- non-secret `TELEGRAM_BOT_USERNAME` configuration,
+- deployment bootstrap with Telegram `setWebhook` and webhook verification,
+- bounded requests, responses, and timeouts.
 
 Tests:
-- success,
-- unauthorized,
-- bad chat ID,
-- timeout,
-- token redaction.
+- Worker routing,
+- D1 binding/repository behavior,
+- missing secret/config failure,
+- webhook bootstrap/configuration verification,
+- body limits and safe errors.
 
 Review before Slice C.
 
-## 8.3 Slice C — Local bridge
+## 8.3 Slice C — Anonymous installation authentication
+Code:
+- installation registration endpoint,
+- lazy registration on first backend use and existing-credential reuse,
+- secure high-entropy credential generation,
+- server-side credential hashing,
+- `BackendClient` registration/authentication,
+- VS Code SecretStorage integration,
+- installation reset/revocation endpoint and lifecycle.
+
+Tests:
+- registration returns credential once,
+- activation alone creates no backend record,
+- existing credential prevents duplicate registration,
+- D1 contains only credential hash,
+- valid/invalid/revoked authentication,
+- reset invalidates credential, pairings, and chat association,
+- credential never appears in URLs or logs.
+
+Review before Slice D.
+
+## 8.4 Slice D — Telegram pairing
+Code:
+- official bot webhook,
+- webhook-secret validation,
+- hashed, expiring, one-time pairing tokens,
+- private-chat exact `/start <token>` matching,
+- D1 chat association,
+- lazy cleanup of expired/used pairing rows and deployment-defined installation retention,
+- deep link and status polling,
+- Connect Telegram and Disconnect Telegram commands.
+
+Tests:
+- exact private-chat pairing,
+- wrong/expired/consumed token rejection,
+- group-chat rejection,
+- webhook authentication,
+- pairing replay resistance,
+- per-installation creation limits and reasonable polling frequency,
+- disconnect and pending-pairing invalidation.
+
+Review before Slice E.
+
+## 8.5 Slice E — Test notification relay
+Code:
+- locally sanitized test message,
+- authenticated notification endpoint,
+- server-side chat lookup,
+- bounded Telegram Bot API send,
+- exactly one extension submission attempt with no automatic retry,
+- no message-body persistence or intentional logging.
+
+Tests:
+- exactly one relay,
+- Test Notification works while Away Mode is OFF,
+- uncertain/lost response does not trigger a second notification POST,
+- unpaired/revoked installation,
+- backend/Telegram timeout and failure,
+- no notification body written to D1 or logs.
+
+Perform real official-bot/device acceptance before continuing to the local Codex event path.
+
+Review before Slice F.
+
+## 8.6 Slice F — Local bridge
 Code:
 - receiver,
 - nonce,
@@ -679,16 +843,17 @@ Tests:
 - invalid nonce,
 - extension not running,
 - malformed JSON,
-- duplicate event.
+- duplicate event,
+- no backend credential in bridge/runtime files.
 
-Review before Slice D.
+Review before Slice G.
 
-## 8.4 Slice D — Finished
+## 8.7 Slice G — Finished
 Code:
 - Stop normalization,
 - session label,
 - last-message truncation,
-- Telegram rendering.
+- local redaction/formatting before relay.
 
 Tests:
 - with/without session title,
@@ -698,12 +863,13 @@ Tests:
 
 Manual IDE test.
 
-Review before Slice E.
+Review before Slice H.
 
-## 8.5 Slice E — Approval
+## 8.8 Slice H — Approval
 Code:
 - PermissionRequest normalization,
-- command/reason extraction.
+- command/reason extraction,
+- local redaction/formatting before relay.
 
 Tests:
 - Bash,
@@ -714,9 +880,9 @@ Tests:
 
 Manual IDE test.
 
-Review before Slice F.
+Review before Slice I.
 
-## 8.6 Slice F — Failure
+## 8.9 Slice I — Failure
 Implement only the strategy approved in Gate 2.
 
 Tests must distinguish:
@@ -771,20 +937,33 @@ Perform a manual code review against:
 
 ## 10.1 Correctness
 - [ ] no duplicate notifications,
+- [ ] notification POST is never automatically retried in V1,
+- [ ] Test Notification sends once and ignores Away Mode,
 - [ ] no recoverable error mislabeled as terminal failure,
-- [ ] Away Mode always respected,
+- [ ] Away Mode always respected for real Codex event notifications,
 - [ ] session label fallback works.
 
 ## 10.2 Security
-- [ ] token only in SecretStorage,
+- [ ] installation credential only in SecretStorage and only its hash in D1,
+- [ ] pairing tokens are hashed, short-lived, and single-use,
+- [ ] Telegram bot/webhook secrets exist only as Worker secrets,
+- [ ] webhook secret validation enabled,
 - [ ] loopback receiver only,
 - [ ] runtime nonce enabled,
-- [ ] secrets redacted,
+- [ ] deterministic redaction and formatting occur locally,
+- [ ] raw Codex events/tool payloads never reach the backend,
+- [ ] notification bodies are not persisted or intentionally logged,
+- [ ] per-endpoint body/rate limits and non-aggressive pairing polling are enforced,
 - [ ] no credentials in Git.
 
 ## 10.3 Reliability
 - [ ] bridge failure never blocks Codex,
+- [ ] backend/D1 failure never blocks Codex,
 - [ ] Telegram failure never blocks Codex,
+- [ ] no infinite retries,
+- [ ] uncertain notification delivery is reported locally without retrying,
+- [ ] revoked installation credentials fail authentication,
+- [ ] expired/consumed pairings cannot be reused and stale rows are cleanable,
 - [ ] extension restart handled,
 - [ ] stale runtime file handled.
 
@@ -805,11 +984,11 @@ README must contain:
 1. What problem it solves
 2. 20-second usage explanation
 3. Installation
-4. Telegram bot setup
+4. Connect/disconnect the official Telegram bot
 5. Codex hook setup/trust step
 6. Away ON/OFF
 7. Notification examples
-8. Privacy/security explanation
+8. Required privacy statement and security explanation
 9. Known limitations
 10. Development commands
 11. License
@@ -821,6 +1000,15 @@ Add:
 - `CONTRIBUTING.md`
 - basic issue templates if useful
 - screenshots/GIF after the MVP works
+
+The V1 privacy statement is a required release deliverable. It must truthfully explain:
+- stored data: anonymous installation record, credential hash, Telegram chat ID, and pairing metadata while needed,
+- excluded data: notification bodies/history, raw Codex events, raw tool payloads, phone number, email, Telegram username as identity, analytics, and telemetry,
+- final sanitized notification text transits the Worker and Telegram,
+- there is no end-to-end encryption claim,
+- Telegram disconnect versus installation reset/revocation behavior.
+
+Do not publish without this statement.
 
 ---
 
@@ -841,7 +1029,7 @@ Verify package does not include:
 Install `.vsix` into a clean VS Code profile.
 
 Test:
-- setup,
+- connect/disconnect Telegram,
 - hook install,
 - hook trust,
 - Telegram,
@@ -865,7 +1053,7 @@ Prepare:
 - repository URL,
 - license,
 - changelog,
-- privacy statement if needed.
+- completed public privacy statement matching the deployed V1 data flow and retention behavior.
 
 Publish V1 only after `.vsix` clean-profile validation.
 
@@ -881,14 +1069,7 @@ Only after V1 is stable:
 - explicit “needs user input” separate from approval,
 - long-running task threshold.
 
-## 14.2 Optional providers
-- ntfy,
-- Pushover,
-- Discord webhook.
-
-Telegram remains the only provider for MVP.
-
-## 14.3 Better session labels
+## 14.2 Better session labels
 If a stable public route becomes available:
 - use Codex user-facing thread name directly.
 
@@ -901,7 +1082,7 @@ Never depend on undocumented UI scraping.
 V1 is done when a fresh user can:
 
 1. install the extension,
-2. configure Telegram once,
+2. connect the official Telegram bot without BotFather, tokens, chat IDs, phone-number entry, or an account,
 3. complete required Codex hook trust/setup,
 4. click `🔔 Codex Alerts: ON`,
 5. walk away,
@@ -918,8 +1099,9 @@ V1 is done when a fresh user can:
 The final product must remain:
 - free,
 - open-source,
-- local-first,
-- no hosted backend,
+- local-first for Codex collection, normalization, redaction, and formatting,
+- backed only by a minimal privacy-limited pairing and notification relay,
+- free of user accounts, analytics, notification history, and remote control,
 - simple enough to turn on/off in one click.
 
 ---

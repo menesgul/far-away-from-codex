@@ -25,10 +25,19 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	);
 
+	const testNotificationCommand = vscode.commands.registerCommand(
+		'far-away-from-codex.testNotification',
+		async () => {
+			void vscode.window.showErrorMessage(
+				'Telegram pairing and notification delivery are not available yet.'
+			);
+		}
+	);
+
 	updateStatusBar();
 	statusBarItem.show();
 
-	context.subscriptions.push(statusBarItem, toggleCommand);
+	context.subscriptions.push(statusBarItem, toggleCommand, testNotificationCommand);
 }
 
 export function deactivate() {}
