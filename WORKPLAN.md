@@ -94,7 +94,6 @@ Use:
 - TypeScript,
 - current supported VS Code Extension API,
 - ESLint,
-- Prettier,
 - a lightweight test runner compatible with VS Code extension testing.
 
 ## 1.3 Development commands
@@ -106,7 +105,6 @@ npm run compile
 npm run watch
 npm run lint
 npm test
-npm run package
 ```
 
 ## 1.4 Local Extension Development Host
@@ -120,12 +118,14 @@ Verify:
 ## 1.5 Gate 1 — Environment Review
 Do not move to external integrations until all are true:
 
-- [ ] clean clone installs successfully,
-- [ ] extension host starts,
-- [ ] lint passes,
-- [ ] empty test suite runs,
-- [ ] status bar renders,
-- [ ] project structure matches `ARCHITECTURE.md`.
+- [x] clean clone installs successfully,
+- [x] extension host starts,
+- [x] lint passes,
+- [x] current test suite runs,
+- [x] status bar renders,
+- [x] project structure matches `ARCHITECTURE.md`.
+
+**Gate 1 status: PASS — Phase 2 may begin.**
 
 ---
 
@@ -828,6 +828,8 @@ Add:
 
 ## 12.1 Package
 Use the standard VS Code extension packaging workflow.
+
+At this stage, provide and validate the appropriate VS Code extension packaging command, such as `npm run package`, using the standard VS Code packaging tooling.
 
 Verify package does not include:
 - secrets,
