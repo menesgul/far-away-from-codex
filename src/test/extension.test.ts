@@ -11,6 +11,8 @@ import { SecretStore } from '../state/SecretStore';
 
 const INSTALLATION_CREDENTIAL = 'abcdefghijklmnopqrstuvwxyz0123456789_ABCDEF';
 const FRESH_INSTALLATION_CREDENTIAL = 'freshinstallationcredential0123456789_ABCDEF';
+const PAIRING_ID = 'pairing_123';
+const PAIRING_EXPIRES_AT = '2030-01-02T03:04:05.000Z';
 
 class FakeCredentialStore implements InstallationCredentialStore {
 	public constructor(public credential?: string) {}
@@ -30,6 +32,17 @@ class FakeCredentialStore implements InstallationCredentialStore {
 
 function registrationResponse(): Response {
 	return new Response(JSON.stringify({ installationCredential: INSTALLATION_CREDENTIAL }), {
+		status: 201,
+		headers: { 'Content-Type': 'application/json' },
+	});
+}
+
+function pairingResponse(): Response {
+	return new Response(JSON.stringify({
+		pairingId: PAIRING_ID,
+		telegramUrl: 'https://t.me/far_away_bot?start=opaque-token',
+		expiresAt: PAIRING_EXPIRES_AT,
+	}), {
 		status: 201,
 		headers: { 'Content-Type': 'application/json' },
 	});
@@ -182,6 +195,95 @@ suite('Extension Test Suite', () => {
 		assert.deepStrictEqual(methods, ['DELETE', 'POST']);
 	});
 
+	test('createPairing authenticates and validates the backend pairing response', async () => {
+		let method: string | undefined;
+		let authorization: string | undefined;
+		let requestPath: string | undefined;
+		const request = (async (input: string | URL | Request, init?: RequestInit) => {
+			method = init?.method;
+			authorization = new Headers(init?.headers).get('Authorization') ?? undefined;
+			requestPath = new URL(input.toString()).pathname;
+			return pairingResponse();
+		}) as typeof fetch;
+		const client = new BackendClient('https://backend.example', 1_000, request);
+
+		const pairing = await client.createPairing(INSTALLATION_CREDENTIAL);
+
+		assert.strictEqual(method, 'POST');
+		assert.strictEqual(requestPath, '/v1/pairings');
+		assert.strictEqual(authorization, `Bearer ${INSTALLATION_CREDENTIAL}`);
+		assert.strictEqual(pairing.pairingId, PAIRING_ID);
+		assert.strictEqual(pairing.telegramUrl, 'https://t.me/far_away_bot?start=opaque-token');
+		assert.strictEqual(pairing.expiresAt.toISOString(), PAIRING_EXPIRES_AT);
+	});
+
+	test('createPairing rejects a backend response with a non-Telegram deep link', async () => {
+		const client = new BackendClient(
+			'https://backend.example',
+			1_000,
+			async () => new Response(JSON.stringify({
+				pairingId: PAIRING_ID,
+				telegramUrl: 'https://example.test/not-telegram',
+				expiresAt: PAIRING_EXPIRES_AT,
+			}), { status: 201 })
+		);
+
+		await assert.rejects(
+			client.createPairing(INSTALLATION_CREDENTIAL),
+			(error: unknown) => error instanceof BackendClientError && /invalid pairing response/.test(error.message)
+		);
+	});
+
+	test('getPairingStatus authenticates and accepts only documented statuses', async () => {
+		let requestPath: string | undefined;
+		let authorization: string | undefined;
+		const client = new BackendClient(
+			'https://backend.example',
+			1_000,
+			async (input, init) => {
+				requestPath = new URL(input.toString()).pathname;
+				authorization = new Headers(init?.headers).get('Authorization') ?? undefined;
+				return new Response(JSON.stringify({ status: 'pending' }), { status: 200 });
+			}
+		);
+
+		assert.strictEqual(await client.getPairingStatus(INSTALLATION_CREDENTIAL, PAIRING_ID), 'pending');
+		assert.strictEqual(requestPath, `/v1/pairings/${PAIRING_ID}`);
+		assert.strictEqual(authorization, `Bearer ${INSTALLATION_CREDENTIAL}`);
+	});
+
+	test('getPairingStatus rejects undocumented statuses', async () => {
+		const client = new BackendClient(
+			'https://backend.example',
+			1_000,
+			async () => new Response(JSON.stringify({ status: 'unknown' }), { status: 200 })
+		);
+
+		await assert.rejects(
+			client.getPairingStatus(INSTALLATION_CREDENTIAL, PAIRING_ID),
+			(error: unknown) => error instanceof BackendClientError && /invalid pairing status/.test(error.message)
+		);
+	});
+
+	test('disconnectTelegram sends an authenticated delete without clearing the installation credential', async () => {
+		let method: string | undefined;
+		let authorization: string | undefined;
+		const client = new BackendClient(
+			'https://backend.example',
+			1_000,
+			async (_input, init) => {
+				method = init?.method;
+				authorization = new Headers(init?.headers).get('Authorization') ?? undefined;
+				return new Response(null, { status: 204 });
+			}
+		);
+
+		await client.disconnectTelegram(INSTALLATION_CREDENTIAL);
+
+		assert.strictEqual(method, 'DELETE');
+		assert.strictEqual(authorization, `Bearer ${INSTALLATION_CREDENTIAL}`);
+	});
+
 	test('SecretStore persists only the anonymous installation credential key', async () => {
 		const storedValues = new Map<string, string>();
 		const storage = {
@@ -212,5 +314,33 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(combinedSource.includes(['api', 'telegram', 'org'].join('.')), false);
 		assert.strictEqual(combinedSource.includes(['telegram', 'botToken'].join('.')), false);
 		assert.strictEqual(combinedSource.includes(['telegram', 'chatId'].join('.')), false);
+	});
+
+	test('extension contributes Telegram connection commands and uses bounded polling', () => {
+		const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8')) as {
+			contributes?: {
+				commands?: Array<{ command?: string }>;
+				configuration?: { properties?: Record<string, unknown> };
+			};
+		};
+		const commands = packageJson.contributes?.commands?.map((command) => command.command) ?? [];
+		const extensionSource = fs.readFileSync(path.resolve(__dirname, '../../src/extension.ts'), 'utf8');
+
+		assert.ok(commands.includes('far-away-from-codex.connectTelegram'));
+		assert.ok(commands.includes('far-away-from-codex.disconnectTelegram'));
+		assert.ok(extensionSource.includes('PAIRING_POLL_INTERVAL_MS = 3_000'));
+		assert.ok(extensionSource.includes('MAX_PAIRING_POLL_DURATION_MS'));
+		assert.ok(extensionSource.includes('vscode.env.openExternal'));
+	});
+
+	test('workspace configuration cannot select the backend for authenticated requests', () => {
+		const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8')) as {
+			contributes?: { configuration?: { properties?: Record<string, unknown> } };
+		};
+		const extensionSource = fs.readFileSync(path.resolve(__dirname, '../../src/extension.ts'), 'utf8');
+
+		assert.strictEqual(packageJson.contributes?.configuration?.properties?.['farAway.backendUrl'], undefined);
+		assert.strictEqual(extensionSource.includes('workspace.getConfiguration'), false);
+		assert.ok(extensionSource.includes('new BackendClient(PRODUCTION_BACKEND_URL)'));
 	});
 });

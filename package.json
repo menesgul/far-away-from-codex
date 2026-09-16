@@ -21,6 +21,14 @@
     {
       "command": "far-away-from-codex.testNotification",
       "title": "Far Away From Codex: Test Notification"
+    },
+    {
+      "command": "far-away-from-codex.connectTelegram",
+      "title": "Far Away From Codex: Connect Telegram"
+    },
+    {
+      "command": "far-away-from-codex.disconnectTelegram",
+      "title": "Far Away From Codex: Disconnect Telegram"
     }
   ]
 },
