@@ -4,7 +4,7 @@ import { SecretStore } from './state/SecretStore';
 
 // This is application-owned, not read from workspace configuration. Replace it when the
 // production Worker URL is provisioned; tests inject their own URL via BackendClient.
-const PRODUCTION_BACKEND_URL = 'https://far-away-from-codex.invalid';
+const PRODUCTION_BACKEND_URL = 'https://far-away-from-codex-worker.menesgul.workers.dev';
 const PAIRING_POLL_INTERVAL_MS = 3_000;
 const MAX_PAIRING_POLL_DURATION_MS = 5 * 60 * 1_000;
 
