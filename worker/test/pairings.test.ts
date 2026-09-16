@@ -13,14 +13,15 @@ const INSTALLATION_CREDENTIAL = "abcdefghijklmnopqrstuvwxyz0123456789_ABCDEF";
 
 class FakeRateLimiter implements RateLimit {
   readonly keys: string[] = [];
-  private attempts = 0;
+  private readonly attemptsByKey = new Map<string, number>();
 
   constructor(private readonly allowedAttempts: number) {}
 
   async limit({ key }: RateLimitOptions): Promise<RateLimitOutcome> {
     this.keys.push(key);
-    this.attempts += 1;
-    return { success: this.attempts <= this.allowedAttempts };
+    const attempts = (this.attemptsByKey.get(key) ?? 0) + 1;
+    this.attemptsByKey.set(key, attempts);
+    return { success: attempts <= this.allowedAttempts };
   }
 }
 
@@ -155,7 +156,7 @@ describe("Telegram pairing", () => {
       workerEnv,
     );
     expect(await pending.json()).toEqual({ status: "pending" });
-    expect(statusRateLimiter.keys).toEqual([installation.id]);
+    expect(statusRateLimiter.keys).toEqual([`pairing-status:${installation.id}`]);
 
     const limited = await worker.fetch(
       new Request(`https://worker.example/v1/pairings/${pairing.pairingId}`, {
