@@ -22,6 +22,8 @@ export function hasRequiredConfiguration(env: Partial<Env>): env is Env {
     env.DB !== undefined &&
     typeof env.DB.prepare === "function" &&
     isRateLimiter(env.REGISTRATION_RATE_LIMITER) &&
+    isRateLimiter(env.PAIRING_CREATION_RATE_LIMITER) &&
+    isRateLimiter(env.PAIRING_STATUS_RATE_LIMITER) &&
     isConfigured(env.TELEGRAM_BOT_TOKEN, MAX_SECRET_LENGTH) &&
     isConfigured(env.TELEGRAM_WEBHOOK_SECRET, MAX_SECRET_LENGTH) &&
     isConfigured(env.TELEGRAM_BOT_USERNAME, MAX_BOT_USERNAME_LENGTH) &&

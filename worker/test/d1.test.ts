@@ -34,6 +34,7 @@ describe("D1 schema foundation", () => {
       "expires_at",
       "used_at",
       "created_at",
+      "consumed_marker",
     ]);
   });
 
