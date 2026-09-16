@@ -55,24 +55,29 @@ The local Codex hook-to-extension bridge remains required. The hosted backend do
 ## 2.1 Telegram pairing path
 
 ```text
-VS Code Extension
-    ↓ POST authenticated pairing request
+Connect Telegram command
+    ↓ ensure/reuse anonymous installation credential
+GET /v1/telegram-connection
+    ↓ connected? report Connected; bypass pairing UI
+    ↓ disconnected? POST authenticated pairing request
 Cloudflare Worker creates one-time pairing token
-    ↓
-Extension opens https://t.me/<official-bot>?start=<one-time-token>
-    ↓
-User presses Start
+    ↓ return pairingId, telegramUrl, expiresAt
+Transient local VS Code pairing UI renders telegramUrl as a QR code
+    ↓ user scans QR with their phone
+Phone opens official Telegram bot; user presses Start
     ↓
 Telegram webhook → Cloudflare Worker
     ↓ validate webhook secret, exact token, private chat
-Associate anonymous installation with Telegram chat_id
+Associate anonymous installation with Telegram private chat_id in D1
     ↓
-D1
-    ↓
-Extension observes paired status
+Extension bounded-polls pairing status
     ↓
 Connected
 ```
+
+The pairing material exists only in the transient pairing UI. It is rendered locally; neither the pairing URL nor token is sent to an external QR-generation service, persisted, or logged. **Open on This Device** is an optional explicit user action that may call `vscode.env.openExternal()`; starting Connect Telegram must not open Telegram automatically. **Copy Link** and Cancel are also explicit pairing-UI actions. The association is with a Telegram private chat/account, not a physical phone.
+
+V1 has no short human pairing-code flow. It includes a lightweight first-activation onboarding prompt as a final UX layer after the core pairing flow is complete and validated; notification relay remains a later Slice E concern.
 
 ---
 
@@ -84,7 +89,7 @@ The bridge exists so that:
 
 - Codex can emit events without knowing backend or Telegram credentials,
 - the anonymous installation credential stays inside VS Code SecretStorage and never enters bridge files,
-- the status-bar Away Mode remains the single source of truth,
+- the status-bar Away Mode remains the single source of truth for local alert enablement while D1 remains authoritative for Telegram connection state,
 - the Codex hook remains lightweight.
 
 The bridge is transport only.
@@ -108,9 +113,11 @@ Responsibilities:
 - create status bar,
 - start local receiver,
 - install/update bridge assets,
-- orchestrate anonymous installation registration and Telegram connection UX.
+- orchestrate lazy anonymous installation registration and the QR-first Telegram connection UX; activation may read an existing credential and perform the single bounded connection-state lookup described below, but must not register an installation or begin pairing.
 
 Must not contain event-specific parsing logic.
+
+On first activation of a fresh local install/profile, the extension may show one local VS Code prompt: **“Connect Telegram to receive Codex alerts on your phone.”** Its only actions are **Connect Telegram** and **Not now**. Showing the prompt itself performs no registration, backend call, connection-state lookup, pairing, QR rendering, or Telegram launch. Connect Telegram delegates to the normal explicit Connect command and its QR-first flow; Not now performs no backend action, and the user can later run the command manually. A small `globalState` `onboardingShown` UX flag may prevent repeated or nagging prompts, but it is not Telegram connection state and must never replace D1 as the authority. The prompt is shown at most once per local VS Code profile/extension UX state; choosing either action marks it shown. Explicit Telegram Disconnect and installation reset/revocation do not reset the flag or automatically show onboarding again. They require a new Telegram setup only when the user later explicitly runs Connect Telegram. A clean extension install or fresh VS Code profile has new local state and may naturally show onboarding again. Once paired, normal VS Code, extension, and PC restarts require neither onboarding nor QR. Onboarding must not become account setup, login, phone-number entry, or automatic Telegram launching.
 
 ---
 
@@ -133,10 +140,22 @@ isEnabled(): boolean
 
 Rules:
 - when OFF, no Telegram alert is sent,
-- when ON, supported normalized events can be sent,
+- when ON, supported normalized events can be sent only with verified Telegram connection state,
 - initial install defaults to OFF.
 
-The status bar renders this service's state.
+`ON + ✕` and `ON + ?` are not normal reachable states. Invoking Disconnect immediately forces Away Mode OFF, but the connection suffix is `✕` only after a definitive successful DELETE; a failed, timed-out, or uncertain DELETE renders `OFF + ?`. A connection-state lookup failure never becomes `✕`.
+
+The status bar renders Away Mode together with the current connection indicator:
+
+```text
+no credential:       $(bell-slash) Codex Alerts: OFF · $(send) ✕
+connected:           $(bell-slash) Codex Alerts: OFF · $(send) ✓
+disconnected:        $(bell-slash) Codex Alerts: OFF · $(send) ✕
+lookup failed:       $(bell-slash) Codex Alerts: OFF · $(send) ?
+enabled/connected:   $(bell) Codex Alerts: ON · $(send) ✓
+```
+
+Status-bar click behavior is stateful: `OFF + ✓` enables alerts, `ON + ✓` disables alerts, `OFF + ✕` offers **Connect Telegram** or Cancel, and `OFF + ?` retries the authoritative connection-state lookup. The retry restores normal `✓` or `✕` behavior only on a successful response; another failure remains `?`. A definitive installation-authentication rejection is a separate anonymous-identity recovery outcome: clear the unusable local credential, render the local installation as unconfigured `OFF + ✕`, and permit a later explicit Connect Telegram action to register a replacement.
 
 ---
 
@@ -155,6 +174,10 @@ farAway.installationCredential
 ```
 
 This high-entropy credential is returned once by the backend and stored only in VS Code SecretStorage. The backend stores only its cryptographic hash.
+
+`SecretStorage` must not hold a persisted Telegram-connected boolean as a source of truth. D1 is authoritative for connection state; the extension reads it through the authenticated connection-status endpoint when a connection-dependent command needs it.
+
+On a definitive installation-authentication rejection, such as an invalid or revoked credential response, remove `farAway.installationCredential` from SecretStorage because that anonymous installation identity is unusable. Do not remove it for timeout, network, or 5xx failures. This classification applies during activation and any later authenticated connection-state lookup. Credential removal is local identity recovery, not a claim that Telegram is disconnected.
 
 SecretStorage must **not** contain:
 - the official Telegram bot token,
@@ -256,6 +279,7 @@ The extension-side client talks only to the Far Away From Codex backend over HTT
 
 Responsibilities:
 - lazily register an anonymous installation on the first backend-dependent action,
+- look up authoritative Telegram connection state,
 - create a one-time Telegram pairing,
 - check pairing status,
 - disconnect Telegram,
@@ -269,7 +293,7 @@ It must never:
 - put credentials in query strings,
 - retry forever.
 
-Installation registration is lazy. Extension activation alone creates no backend or D1 record. `Far Away From Codex: Connect Telegram` first checks SecretStorage, reuses an existing installation credential when present, and calls `POST /v1/installations` only when it is missing.
+Installation registration is lazy. On activation, the extension first reads SecretStorage. With no installation credential, it makes no backend request and renders the unconfigured `OFF + ✕` status. With an existing credential, it makes exactly one bounded authenticated `GET /v1/telegram-connection`: `{ connected: true }` renders `OFF + ✓`, `{ connected: false }` renders `OFF + ✕`, and a timeout, network, or 5xx failure renders `OFF + ?` while retaining the credential. A definitive installation-authentication rejection means the credential is invalid/revoked: clear it from SecretStorage and render the local installation as unconfigured `OFF + ✕`; do not treat that identity-recovery outcome as a Telegram disconnect. Activation never calls `POST /v1/installations`, creates a backend/D1 record, creates a pairing, renders a QR, or launches Telegram. `Far Away From Codex: Connect Telegram` reuses an existing credential when present and calls `POST /v1/installations` only when it is missing. Therefore, after definitive credential rejection, only a later explicit Connect Telegram action may lazily register a replacement credential and continue the existing QR-first flow. It then calls `GET /v1/telegram-connection`; when `{ connected: true }`, it reports Telegram connected and does not create a pairing or show the pairing UI.
 
 `POST /v1/notifications` is attempted exactly once in V1 and is never automatically retried by the extension. A lost response after successful Worker delivery creates an uncertain outcome; retrying could duplicate the Telegram message. The extension reports delivery as uncertain/failed locally and does not affect Codex. Read-only/idempotent operations such as pairing-status checks may use bounded retries. Future notification retries require an explicit idempotency key or client-generated delivery ID plus short-lived server-side deduplication state; V1 does not implement that mechanism.
 
@@ -281,13 +305,15 @@ The Worker is an intentionally small pairing and relay service.
 
 Responsibilities:
 - create anonymous installation records and authenticate extension requests,
-- create/check one-time pairings,
+- read authoritative Telegram connection state and create/check one-time pairings,
 - validate and handle the Telegram webhook,
 - perform bounded D1 operations,
 - relay sanitized notification text through the official bot,
 - translate Telegram API failures,
 - disconnect Telegram and revoke installation access where appropriate,
 - enforce request/body limits, rate limits, and abuse protection.
+
+`POST /v1/pairings` must refuse to create a pairing when the authenticated installation already has `telegram_chat_id`. It returns a safe `409 ALREADY_CONNECTED` response (for example, `{ code: "ALREADY_CONNECTED", connected: true }`) without exposing a chat ID, pairing token, or pairing URL. This is defense in depth against stale clients and races; the normal Connect flow checks connection state first.
 
 The project owner creates the official Far Away From Codex bot once with BotFather. End users never create a bot and never provide a phone number, Telegram username, bot token, or chat ID. Worker secrets are:
 
@@ -339,6 +365,7 @@ D1 contains no notification-body/history table, Codex-event table, or user-profi
 - stale expired or used pairing rows may be deleted lazily during normal requests,
 - scheduled cleanup may be added if operationally needed, but V1 requires no complex background cleanup infrastructure,
 - disconnecting Telegram leaves the installation and its credential valid,
+- a successful private-chat association persists in D1 across VS Code reloads, extension reloads, PC restarts, and Away Mode changes until explicit Telegram Disconnect, installation reset/revocation, or loss/replacement of the anonymous installation identity,
 - revoked installations fail authentication,
 - abandoned or revoked installations may be purged after a reasonable deployment-defined retention period; retention is not a user-facing setting.
 
@@ -354,8 +381,14 @@ POST /v1/installations
 
 POST /v1/pairings
   Require installation bearer authentication.
+  Refuse when the authenticated installation already has telegram_chat_id.
+  Return safe 409 ALREADY_CONNECTED with no chat ID, token, or URL in that case.
   Create a short-lived, one-time pairing.
   Return pairingId, telegramUrl, and expiresAt.
+
+GET /v1/telegram-connection
+  Require installation bearer authentication.
+  Return { connected: boolean } from the installation's D1 telegram_chat_id.
 
 GET /v1/pairings/:id
   Require installation bearer authentication.
@@ -375,7 +408,7 @@ POST /v1/notifications
 
 DELETE /v1/telegram-connection
   Require installation bearer authentication.
-  Clear the chat association and invalidate applicable pending pairings.
+  Clear the chat association and invalidate pending pairings.
 
 DELETE /v1/installation
   Require the current installation bearer credential.
@@ -383,9 +416,9 @@ DELETE /v1/installation
   Make the credential unusable for all subsequent requests.
 ```
 
-Pairing tokens use cryptographically secure randomness, are stored only as hashes, expire quickly, require exact matching, and are consumed once. The `/start` token necessarily appears transiently in Telegram during deep-link pairing; it is not a long-lived credential. Pairing never trusts a Telegram username and accepts private chats only.
+Pairing tokens use cryptographically secure randomness, are stored only as hashes, expire quickly, require exact matching, and are consumed once. The `/start` token necessarily appears transiently in Telegram during QR/deep-link pairing; it is not a long-lived credential. The extension renders the returned `telegramUrl` as a QR code locally in a transient pairing UI; it never sends pairing material to an external QR-generation service and never persists or logs it. A user may explicitly choose Copy Link or Open on This Device; only the latter may call `vscode.env.openExternal()`, and it must never happen automatically. Pairing never trusts a Telegram username and accepts private chats only.
 
-`Far Away From Codex: Disconnect Telegram` clears the server-side chat association and relevant pending pairings while keeping the installation identity and credential valid. `DELETE /v1/installation` resets/revokes the anonymous installation itself, invalidates its credential and pending pairings, and clears its Telegram association. Installation reset is a recovery path, not an everyday action. Neither operation affects the official bot token, and neither is user-account deletion because no user account exists.
+`Far Away From Codex: Disconnect Telegram` immediately forces local Away Mode OFF, then calls authenticated `DELETE /v1/telegram-connection`. A definitive DELETE success clears the server-side chat association and relevant pending pairings while keeping the installation identity and credential valid, and renders `OFF + ✕`. If DELETE fails, times out, or has an uncertain result, render `OFF + ?`, show a safe local error/retry message, and do not claim Telegram is disconnected; a later successful authoritative `GET /v1/telegram-connection` may resolve the indicator to `✓` or `✕`. `DELETE /v1/installation` resets/revokes the anonymous installation itself, invalidates its credential and pending pairings, and clears its Telegram association. Installation reset is a recovery path, not an everyday action. Neither operation affects the official bot token, and neither is user-account deletion because no user account exists.
 
 ## 4.10 Trust boundaries
 
@@ -426,6 +459,7 @@ The Worker builds `https://t.me/<official-bot>?start=<pairing-token>` from `TELE
 
 - `POST /v1/installations` is unauthenticated, so it requires IP-level rate limiting/abuse controls, a bounded request body, and protection against unlimited D1 record creation.
 - `POST /v1/pairings` is installation-authenticated, rate-limited per installation, and prevents unlimited concurrent active pairings.
+- `GET /v1/telegram-connection` is installation-authenticated, scoped to its installation, returns only `{ connected: boolean }`, and is rate-limited to a reasonable activation- and command-driven read frequency.
 - `GET /v1/pairings/:id` is installation-authenticated, scoped to its installation, and limited to a reasonable polling frequency; clients must not poll aggressively.
 - `POST /v1/notifications` is installation-authenticated, rate-limited per installation, and enforces a bounded message length/body.
 - `POST /v1/telegram/webhook` validates the webhook secret before processing, enforces a bounded body, and safely rejects malformed or unsupported updates.
@@ -905,6 +939,7 @@ API concept:
 
 ```ts
 registerInstallation(): Promise<InstallationCredential>
+getTelegramConnection(): Promise<{ connected: boolean }>
 createPairing(): Promise<Pairing>
 getPairingStatus(pairingId: string): Promise<PairingStatus>
 disconnectTelegram(): Promise<void>
@@ -914,7 +949,7 @@ sendNotification(message: string): Promise<SendResult>
 Responsibilities:
 - authenticated HTTPS calls to the Worker,
 - anonymous installation registration,
-- pairing creation and status checks,
+- authoritative connection-state lookup, pairing creation, and status checks,
 - disconnect requests,
 - sending only sanitized, formatted notification text,
 - bounded timeouts and safe backend error reporting.
@@ -927,7 +962,7 @@ Must not:
 
 Recommended behavior:
 - short, bounded timeouts,
-- bounded retries only for safe/idempotent operations such as pairing-status reads,
+- bounded retries only for safe/idempotent operations such as connection-state and pairing-status reads,
 - exactly one attempt for `POST /v1/notifications`; timeout or lost response is reported as uncertain/failed without automatic retry.
 
 Future notification retry support requires an explicit idempotency key/delivery ID and short-lived server-side deduplication state before retries can be enabled.
@@ -1090,7 +1125,8 @@ Pure services:
 - NotificationFormatter,
 - Redactor,
 - Deduplicator,
-- AwayModeService.
+- AwayModeService,
+- connection-status indicator and status-bar action resolver.
 
 ## 17.2 Integration tests
 Mock:
@@ -1099,7 +1135,7 @@ Mock:
 - Telegram endpoint and D1 in Worker tests,
 - SecretStorage.
 
-Cover lazy installation registration/reuse, webhook bootstrap/authentication, pairing lifecycle and cleanup, per-endpoint limits, installation reset versus Telegram disconnect, notification no-retry behavior under uncertain delivery, and Test Notification while Away Mode is OFF.
+Cover lazy installation registration/reuse; activation with no credential and zero backend requests; one bounded authoritative connection lookup when a credential exists; connected/disconnected/failed `✓`/`✕`/`?` status rendering; definitive invalid/revoked-credential cleanup versus retained credentials on timeout/network/5xx; no activation registration or persisted local connection boolean; status-bar click actions; successful Disconnect as `OFF + ✕` versus failed/uncertain Disconnect as `OFF + ?` with Away Mode OFF in both cases; QR-first pairing lifecycle and cleanup; no automatic deep-link launch; webhook bootstrap/authentication; `ALREADY_CONNECTED` race protection; per-endpoint limits; installation reset versus Telegram disconnect; persistent association across reload/Away Mode changes; notification no-retry behavior under uncertain delivery; and Test Notification while Away Mode is OFF.
 
 Use real Codex only in manual/contract tests.
 
