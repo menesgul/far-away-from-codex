@@ -19,7 +19,7 @@ describe("Worker routing and request safety", () => {
   });
 
   it("returns a safe not-found response for an unimplemented route", async () => {
-    const response = await exports.default.fetch("https://worker.example/v1/pairings");
+    const response = await exports.default.fetch("https://worker.example/v1/not-implemented");
 
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({

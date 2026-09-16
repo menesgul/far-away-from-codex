@@ -2,7 +2,9 @@ import { hasRequiredConfiguration } from "./config";
 import type { Env } from "./env";
 import { enforceRequestBounds, errorResponse, jsonResponse } from "./http";
 import { registerInstallation, revokeInstallation } from "./installations";
+import { createPairing, disconnectTelegram, getPairingStatus } from "./pairings";
 import { enforceRegistrationRateLimit } from "./registrationRateLimit";
+import { handleTelegramWebhook } from "./telegramWebhook";
 import { withTimeout } from "./timeout";
 
 const D1_HEALTH_TIMEOUT_MS = 2_000;
@@ -21,16 +23,29 @@ async function healthResponse(env: Partial<Env>): Promise<Response> {
 }
 
 async function handleRequest(request: Request, env: Env): Promise<Response> {
-  const boundsError = await enforceRequestBounds(request);
-  if (boundsError !== undefined) {
-    return boundsError;
-  }
-
   let url: URL;
   try {
     url = new URL(request.url);
   } catch {
     return errorResponse(400, "INVALID_REQUEST", "Request URL is invalid.");
+  }
+
+  // Telegram's secret is checked by the webhook handler before it reads or parses the body.
+  if (url.pathname === "/v1/telegram/webhook") {
+    if (request.method !== "POST") {
+      return errorResponse(405, "METHOD_NOT_ALLOWED", "Method not allowed.");
+    }
+
+    if (!hasRequiredConfiguration(env)) {
+      return errorResponse(503, "SERVICE_UNAVAILABLE", "Worker configuration is incomplete.");
+    }
+
+    return handleTelegramWebhook(request, env);
+  }
+
+  const boundsError = await enforceRequestBounds(request);
+  if (boundsError !== undefined) {
+    return boundsError;
   }
 
   if (url.pathname === "/health") {
@@ -67,6 +82,39 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     }
 
     return revokeInstallation(request, env);
+  }
+
+  if (url.pathname === "/v1/pairings") {
+    if (request.method !== "POST") {
+      return errorResponse(405, "METHOD_NOT_ALLOWED", "Method not allowed.");
+    }
+
+    if (!hasRequiredConfiguration(env)) {
+      return errorResponse(503, "SERVICE_UNAVAILABLE", "Worker configuration is incomplete.");
+    }
+
+    return createPairing(request, env);
+  }
+
+  const pairingStatusMatch = url.pathname.match(/^\/v1\/pairings\/([^/]+)$/);
+  if (pairingStatusMatch !== null) {
+    if (request.method !== "GET") {
+      return errorResponse(405, "METHOD_NOT_ALLOWED", "Method not allowed.");
+    }
+
+    if (!hasRequiredConfiguration(env)) {
+      return errorResponse(503, "SERVICE_UNAVAILABLE", "Worker configuration is incomplete.");
+    }
+
+    return getPairingStatus(request, env, pairingStatusMatch[1]);
+  }
+
+  if (url.pathname === "/v1/telegram-connection") {
+    if (request.method !== "DELETE") {
+      return errorResponse(405, "METHOD_NOT_ALLOWED", "Method not allowed.");
+    }
+
+    return disconnectTelegram(request, env);
   }
 
   return errorResponse(404, "NOT_FOUND", "Route not found.");
