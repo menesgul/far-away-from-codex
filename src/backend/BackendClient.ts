@@ -10,9 +10,28 @@ interface RegistrationResponse {
 	installationCredential?: unknown;
 }
 
+interface PairingResponse {
+	pairingId?: unknown;
+	telegramUrl?: unknown;
+	expiresAt?: unknown;
+}
+
+interface PairingStatusResponse {
+	status?: unknown;
+}
+
+export interface Pairing {
+	pairingId: string;
+	telegramUrl: string;
+	expiresAt: Date;
+}
+
+export type PairingStatus = 'pending' | 'connected' | 'expired';
+
 const MAX_RESPONSE_BODY_BYTES = 8 * 1024;
 const MIN_INSTALLATION_CREDENTIAL_LENGTH = 32;
 const MAX_INSTALLATION_CREDENTIAL_LENGTH = 128;
+const MAX_PAIRING_ID_LENGTH = 128;
 
 export class BackendClient {
 	private registrationInFlight: Promise<string> | undefined;
@@ -66,6 +85,75 @@ export class BackendClient {
 			// A lost DELETE response may mean the backend already revoked this credential.
 			await store.deleteInstallationCredential();
 		}
+	}
+
+	public async createPairing(credential: string): Promise<Pairing> {
+		this.assertValidCredential(credential);
+
+		return this.executeRequest(
+			'/v1/pairings',
+			{
+				method: 'POST',
+				headers: { Authorization: `Bearer ${credential}` },
+			},
+			async (response) => {
+				if (response.status !== 201) {
+					throw this.errorForStatus(response.status);
+				}
+
+				const result = await this.readBoundedJson(response);
+				const pairing = this.parsePairingResponse(result);
+				if (pairing === undefined) {
+					throw new BackendClientError('The backend returned an invalid pairing response.');
+				}
+
+				return pairing;
+			}
+		);
+	}
+
+	public async getPairingStatus(credential: string, pairingId: string): Promise<PairingStatus> {
+		this.assertValidCredential(credential);
+		if (!this.isValidPairingId(pairingId)) {
+			throw new BackendClientError('The pairing identifier is invalid.');
+		}
+
+		return this.executeRequest(
+			`/v1/pairings/${encodeURIComponent(pairingId)}`,
+			{
+				method: 'GET',
+				headers: { Authorization: `Bearer ${credential}` },
+			},
+			async (response) => {
+				if (response.status !== 200) {
+					throw this.errorForStatus(response.status);
+				}
+
+				const result = await this.readBoundedJson(response);
+				if (!this.isPairingStatusResponse(result)) {
+					throw new BackendClientError('The backend returned an invalid pairing status.');
+				}
+
+				return result.status;
+			}
+		);
+	}
+
+	public async disconnectTelegram(credential: string): Promise<void> {
+		this.assertValidCredential(credential);
+
+		await this.executeRequest(
+			'/v1/telegram-connection',
+			{
+				method: 'DELETE',
+				headers: { Authorization: `Bearer ${credential}` },
+			},
+			async (response) => {
+				if (response.status !== 204) {
+					throw this.errorForStatus(response.status);
+				}
+			}
+		);
 	}
 
 	private async registerAndStoreInstallation(store: InstallationCredentialStore): Promise<string> {
@@ -199,12 +287,70 @@ export class BackendClient {
 			&& /^[A-Za-z0-9_-]+$/.test(value);
 	}
 
+	private assertValidCredential(credential: string): void {
+		if (!this.isValidCredential(credential)) {
+			throw new BackendClientError('No anonymous installation is registered.');
+		}
+	}
+
 	private isRegistrationResponse(value: unknown): value is RegistrationResponse & {
 		installationCredential: string;
 	} {
 		return typeof value === 'object'
 			&& value !== null
 			&& this.isValidCredential((value as RegistrationResponse).installationCredential);
+	}
+
+	private parsePairingResponse(value: unknown): Pairing | undefined {
+		if (typeof value !== 'object' || value === null) {
+			return undefined;
+		}
+
+		const response = value as PairingResponse;
+		if (!this.isValidPairingId(response.pairingId) || typeof response.telegramUrl !== 'string'
+			|| typeof response.expiresAt !== 'string') {
+			return undefined;
+		}
+
+		const expiresAt = new Date(response.expiresAt);
+		if (Number.isNaN(expiresAt.getTime())) {
+			return undefined;
+		}
+
+		let telegramUrl: URL;
+		try {
+			telegramUrl = new URL(response.telegramUrl);
+		} catch {
+			return undefined;
+		}
+
+		if (telegramUrl.protocol !== 'https:' || telegramUrl.hostname !== 't.me'
+			|| telegramUrl.username !== '' || telegramUrl.password !== '') {
+			return undefined;
+		}
+
+		return {
+			pairingId: response.pairingId,
+			telegramUrl: telegramUrl.toString(),
+			expiresAt,
+		};
+	}
+
+	private isValidPairingId(value: unknown): value is string {
+		return typeof value === 'string'
+			&& value.length > 0
+			&& value.length <= MAX_PAIRING_ID_LENGTH
+			&& /^[A-Za-z0-9_-]+$/.test(value);
+	}
+
+	private isPairingStatusResponse(value: unknown): value is PairingStatusResponse & {
+		status: PairingStatus;
+	} {
+		return typeof value === 'object'
+			&& value !== null
+			&& ((value as PairingStatusResponse).status === 'pending'
+				|| (value as PairingStatusResponse).status === 'connected'
+				|| (value as PairingStatusResponse).status === 'expired');
 	}
 
 	private parseBaseUrl(value: string): URL {
