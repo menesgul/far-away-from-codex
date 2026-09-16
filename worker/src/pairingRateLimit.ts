@@ -3,6 +3,7 @@ import { withTimeout, WORKER_DEPENDENCY_TIMEOUT_MS } from "./timeout";
 
 export const PAIRING_CREATION_RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 export const PAIRING_STATUS_RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
+export const TELEGRAM_CONNECTION_RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
 interface PairingRateLimitOptions {
   unavailableCode: string;
@@ -46,4 +47,12 @@ export const pairingStatusRateLimitOptions: PairingRateLimitOptions = {
   limitedCode: "PAIRING_STATUS_RATE_LIMITED",
   limitedMessage: "Too many pairing status requests. Please try again later.",
   retryAfterSeconds: PAIRING_STATUS_RATE_LIMIT_RETRY_AFTER_SECONDS,
+};
+
+export const telegramConnectionRateLimitOptions: PairingRateLimitOptions = {
+  unavailableCode: "TELEGRAM_CONNECTION_UNAVAILABLE",
+  unavailableMessage: "Telegram connection is temporarily unavailable. Please try again later.",
+  limitedCode: "TELEGRAM_CONNECTION_RATE_LIMITED",
+  limitedMessage: "Too many Telegram connection-state requests. Please try again later.",
+  retryAfterSeconds: TELEGRAM_CONNECTION_RATE_LIMIT_RETRY_AFTER_SECONDS,
 };

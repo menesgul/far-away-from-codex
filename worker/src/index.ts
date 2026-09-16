@@ -2,7 +2,12 @@ import { hasRequiredConfiguration } from "./config";
 import type { Env } from "./env";
 import { enforceRequestBounds, errorResponse, jsonResponse } from "./http";
 import { registerInstallation, revokeInstallation } from "./installations";
-import { createPairing, disconnectTelegram, getPairingStatus } from "./pairings";
+import {
+  createPairing,
+  disconnectTelegram,
+  getPairingStatus,
+  getTelegramConnection,
+} from "./pairings";
 import { enforceRegistrationRateLimit } from "./registrationRateLimit";
 import { handleTelegramWebhook } from "./telegramWebhook";
 import { withTimeout } from "./timeout";
@@ -110,11 +115,15 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   if (url.pathname === "/v1/telegram-connection") {
-    if (request.method !== "DELETE") {
-      return errorResponse(405, "METHOD_NOT_ALLOWED", "Method not allowed.");
+    if (request.method === "GET") {
+      return getTelegramConnection(request, env);
     }
 
-    return disconnectTelegram(request, env);
+    if (request.method === "DELETE") {
+      return disconnectTelegram(request, env);
+    }
+
+    return errorResponse(405, "METHOD_NOT_ALLOWED", "Method not allowed.");
   }
 
   return errorResponse(404, "NOT_FOUND", "Route not found.");

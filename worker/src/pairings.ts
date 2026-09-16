@@ -5,6 +5,7 @@ import {
   enforceInstallationRateLimit,
   pairingCreationRateLimitOptions,
   pairingStatusRateLimitOptions,
+  telegramConnectionRateLimitOptions,
 } from "./pairingRateLimit";
 import { withTimeout, WORKER_DEPENDENCY_TIMEOUT_MS } from "./timeout";
 
@@ -14,6 +15,10 @@ export const PAIRING_TTL_MS = 5 * 60 * 1_000;
 interface PairingStatusRow {
   expires_at: number;
   used_at: number | null;
+}
+
+interface TelegramConnectionRow {
+  telegram_chat_id: string | null;
 }
 
 function toBase64Url(bytes: Uint8Array): string {
@@ -111,7 +116,7 @@ export async function getPairingStatus(
   }
 
   const rateLimitResponse = await enforceInstallationRateLimit(
-    authentication.installationId,
+    `pairing-status:${authentication.installationId}`,
     env.PAIRING_STATUS_RATE_LIMITER,
     pairingStatusRateLimitOptions,
   );
@@ -147,6 +152,58 @@ export async function getPairingStatus(
   }
 
   return jsonResponse({ status: "pending" });
+}
+
+export async function getTelegramConnection(request: Request, env: Env): Promise<Response> {
+  let authentication;
+  try {
+    authentication = await authenticateInstallation(request, env.DB);
+  } catch {
+    return errorResponse(
+      503,
+      "TELEGRAM_CONNECTION_UNAVAILABLE",
+      "Telegram connection is temporarily unavailable.",
+    );
+  }
+
+  if (!authentication.authenticated) {
+    return errorResponse(401, "UNAUTHORIZED", "Installation authentication failed.");
+  }
+
+  const rateLimitResponse = await enforceInstallationRateLimit(
+    `telegram-connection:${authentication.installation.id}`,
+    env.PAIRING_STATUS_RATE_LIMITER,
+    telegramConnectionRateLimitOptions,
+  );
+  if (rateLimitResponse !== undefined) {
+    return rateLimitResponse;
+  }
+
+  let installation: TelegramConnectionRow | null;
+  try {
+    installation = await withTimeout(
+      env.DB
+        .prepare(
+          "SELECT telegram_chat_id FROM installations WHERE id = ? AND revoked_at IS NULL LIMIT 1",
+        )
+        .bind(authentication.installation.id)
+        .first<TelegramConnectionRow>(),
+      WORKER_DEPENDENCY_TIMEOUT_MS,
+    );
+  } catch {
+    return errorResponse(
+      503,
+      "TELEGRAM_CONNECTION_UNAVAILABLE",
+      "Telegram connection is temporarily unavailable.",
+    );
+  }
+
+  // A revocation after authentication must be treated as unauthenticated rather than disconnected.
+  if (installation === null) {
+    return errorResponse(401, "UNAUTHORIZED", "Installation authentication failed.");
+  }
+
+  return jsonResponse({ connected: installation.telegram_chat_id !== null });
 }
 
 export async function disconnectTelegram(request: Request, env: Env): Promise<Response> {
