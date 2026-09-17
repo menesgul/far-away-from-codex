@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { createTelegramPairingAndStartPolling } from '../extension';
 import {
 	BackendClient,
 	BackendClientError,
@@ -15,6 +16,10 @@ import {
 	statusBarText,
 	type TelegramConnectionClient,
 } from '../state/TelegramConnectionState';
+import {
+	generateTelegramPairingQrDataUri,
+	renderTelegramPairingHtml,
+} from '../ui/TelegramPairingPanel';
 
 const INSTALLATION_CREDENTIAL = 'abcdefghijklmnopqrstuvwxyz0123456789_ABCDEF';
 const FRESH_INSTALLATION_CREDENTIAL = 'freshinstallationcredential0123456789_ABCDEF';
@@ -398,7 +403,8 @@ suite('Extension Test Suite', () => {
 		const store = new FakeCredentialStore(INSTALLATION_CREDENTIAL);
 		const requests: Array<{ method: string; path: string }> = [];
 		const client = new BackendClient('https://backend.example', 1_000, async (url, init) => {
-			requests.push({ method: init?.method ?? 'GET', path: new URL(url).pathname });
+			const requestUrl = typeof url === 'string' || url instanceof URL ? url : url.url;
+			requests.push({ method: init?.method ?? 'GET', path: new URL(requestUrl).pathname });
 			return telegramConnectionResponse(true);
 		});
 
@@ -498,6 +504,70 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(combinedSource.includes(['telegram', 'chatId'].join('.')), false);
 	});
 
+	test('Telegram pairing QR is generated locally as an SVG data URI', async () => {
+		const telegramUrl = 'https://t.me/far_away_bot?start=opaque-token';
+		const qrDataUri = await generateTelegramPairingQrDataUri(telegramUrl);
+
+		assert.ok(qrDataUri.startsWith('data:image/svg+xml;base64,'));
+		const svg = Buffer.from(qrDataUri.slice('data:image/svg+xml;base64,'.length), 'base64').toString('utf8');
+		assert.ok(svg.startsWith('<svg'));
+		assert.ok(svg.includes('viewBox='));
+	});
+
+	test('Telegram pairing HTML safely renders a local QR image without exposing the pairing URL', async () => {
+		const telegramUrl = 'https://t.me/far_away_bot?start=opaque-token';
+		const html = renderTelegramPairingHtml(await generateTelegramPairingQrDataUri(telegramUrl), 'test-nonce');
+
+		assert.ok(html.includes('<img class="qr-code"'));
+		assert.strictEqual(html.includes('<svg'), false);
+		assert.ok(html.includes("default-src 'none'"));
+		assert.ok(html.includes('img-src data:'));
+		assert.ok(html.includes("style-src 'nonce-test-nonce'"));
+		assert.strictEqual(html.includes('http://'), false);
+		assert.strictEqual(html.includes('https://'), false);
+		assert.strictEqual(html.includes(telegramUrl), false);
+		assert.strictEqual(html.includes('opaque-token'), false);
+	});
+
+	test('Connect creates a pairing, opens the local panel, and retains bounded polling without opening Telegram', async () => {
+		const store = new FakeCredentialStore();
+		const calls: string[] = [];
+		const client = {
+			ensureInstallation: async (currentStore: InstallationCredentialStore) => {
+				calls.push('ensureInstallation');
+				assert.strictEqual(currentStore, store);
+				return INSTALLATION_CREDENTIAL;
+			},
+			createPairing: async (credential: string) => {
+				calls.push('createPairing');
+				assert.strictEqual(credential, INSTALLATION_CREDENTIAL);
+				return {
+					pairingId: PAIRING_ID,
+					telegramUrl: 'https://t.me/far_away_bot?start=opaque-token',
+					expiresAt: new Date('2030-01-02T03:04:05.000Z'),
+				};
+			},
+		};
+
+		const outcome = await createTelegramPairingAndStartPolling(
+			client,
+			store,
+			async (telegramUrl) => {
+				calls.push('showPanel');
+				assert.strictEqual(telegramUrl, 'https://t.me/far_away_bot?start=opaque-token');
+			},
+			async (credential, pairing) => {
+				calls.push('poll');
+				assert.strictEqual(credential, INSTALLATION_CREDENTIAL);
+				assert.strictEqual(pairing.pairingId, PAIRING_ID);
+				return 'connected';
+			}
+		);
+
+		assert.strictEqual(outcome, 'connected');
+		assert.deepStrictEqual(calls, ['ensureInstallation', 'createPairing', 'showPanel', 'poll']);
+	});
+
 	test('extension contributes Telegram connection commands and uses bounded polling', () => {
 		const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8')) as {
 			contributes?: {
@@ -512,7 +582,9 @@ suite('Extension Test Suite', () => {
 		assert.ok(commands.includes('far-away-from-codex.disconnectTelegram'));
 		assert.ok(extensionSource.includes('PAIRING_POLL_INTERVAL_MS = 3_000'));
 		assert.ok(extensionSource.includes('MAX_PAIRING_POLL_DURATION_MS'));
-		assert.ok(extensionSource.includes('vscode.env.openExternal'));
+		assert.strictEqual(extensionSource.includes('openExternal'), false);
+		assert.ok(extensionSource.includes('createTelegramPairingAndStartPolling('));
+		assert.ok(extensionSource.includes('pollForPairing(backendClient, credential, pairing)'));
 		assert.ok(extensionSource.includes("let alertsEnabled = false"));
 		assert.ok(extensionSource.includes("let connectionState: TelegramConnectionState = 'unknown'"));
 		assert.ok(extensionSource.includes('let connectionStateRevision = 0'));
@@ -523,6 +595,16 @@ suite('Extension Test Suite', () => {
 		assert.ok(extensionSource.includes('void refreshConnectionState();'));
 		assert.ok(extensionSource.includes("applyConnectionState('connected')"));
 		assert.ok(extensionSource.includes("applyConnectionState('disconnected')"));
+	});
+
+	test('pairing material is not persisted by extension state', () => {
+		const extensionSource = fs.readFileSync(path.resolve(__dirname, '../../src/extension.ts'), 'utf8');
+		const secretStoreSource = fs.readFileSync(path.resolve(__dirname, '../../src/state/SecretStore.ts'), 'utf8');
+
+		assert.strictEqual(extensionSource.includes('globalState'), false);
+		assert.strictEqual(extensionSource.includes('workspaceState'), false);
+		assert.strictEqual(secretStoreSource.includes('pairing'), false);
+		assert.strictEqual(secretStoreSource.includes('telegramUrl'), false);
 	});
 
 	test('workspace configuration cannot select the backend for authenticated requests', () => {
