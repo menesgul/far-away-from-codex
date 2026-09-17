@@ -21,6 +21,10 @@ interface TelegramConnectionRow {
   telegram_chat_id: string | null;
 }
 
+interface PairingCreationOutcomeRow {
+  outcome: "inserted" | "connected" | "unauthorized";
+}
+
 function toBase64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) {
@@ -39,6 +43,21 @@ export function generatePairingToken(): string {
 export async function hashPairingToken(token: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function getActiveInstallationTelegramConnection(
+  database: D1Database,
+  installationId: string,
+): Promise<TelegramConnectionRow | null> {
+  return withTimeout(
+    database
+      .prepare(
+        "SELECT telegram_chat_id FROM installations WHERE id = ? AND revoked_at IS NULL LIMIT 1",
+      )
+      .bind(installationId)
+      .first<TelegramConnectionRow>(),
+    WORKER_DEPENDENCY_TIMEOUT_MS,
+  );
 }
 
 async function authenticatePairingRequest(
@@ -63,6 +82,24 @@ export async function createPairing(request: Request, env: Env): Promise<Respons
     return authentication;
   }
 
+  let installation: TelegramConnectionRow | null;
+  try {
+    installation = await getActiveInstallationTelegramConnection(
+      env.DB,
+      authentication.installationId,
+    );
+  } catch {
+    return errorResponse(503, "PAIRING_UNAVAILABLE", "Pairing is temporarily unavailable.");
+  }
+
+  if (installation === null) {
+    return errorResponse(401, "UNAUTHORIZED", "Installation authentication failed.");
+  }
+
+  if (installation.telegram_chat_id !== null) {
+    return errorResponse(409, "ALREADY_CONNECTED", "Telegram is already connected.");
+  }
+
   const rateLimitResponse = await enforceInstallationRateLimit(
     authentication.installationId,
     env.PAIRING_CREATION_RATE_LIMITER,
@@ -78,20 +115,50 @@ export async function createPairing(request: Request, env: Env): Promise<Respons
   const now = Date.now();
   const expiresAt = now + PAIRING_TTL_MS;
 
+  let result: D1Result<unknown>[];
   try {
-    await withTimeout(
+    result = await withTimeout(
       env.DB.batch([
-        env.DB.prepare("DELETE FROM pairings WHERE installation_id = ? AND used_at IS NULL")
-          .bind(authentication.installationId),
         env.DB
           .prepare(
-            "INSERT INTO pairings (id, installation_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            "DELETE FROM pairings WHERE installation_id = ? AND used_at IS NULL " +
+              "AND EXISTS (SELECT 1 FROM installations " +
+              "WHERE id = ? AND revoked_at IS NULL AND telegram_chat_id IS NULL)",
           )
-          .bind(pairingId, authentication.installationId, tokenHash, expiresAt, now),
+          .bind(authentication.installationId, authentication.installationId),
+        env.DB
+          .prepare(
+            "INSERT INTO pairings (id, installation_id, token_hash, expires_at, created_at) " +
+              "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM installations " +
+              "WHERE id = ? AND revoked_at IS NULL AND telegram_chat_id IS NULL)",
+          )
+          .bind(pairingId, authentication.installationId, tokenHash, expiresAt, now, authentication.installationId),
+        env.DB
+          .prepare(
+            "SELECT CASE " +
+              "WHEN EXISTS (SELECT 1 FROM pairings WHERE id = ?) THEN 'inserted' " +
+              "WHEN EXISTS (SELECT 1 FROM installations " +
+              "WHERE id = ? AND revoked_at IS NULL AND telegram_chat_id IS NOT NULL) THEN 'connected' " +
+              "ELSE 'unauthorized' END AS outcome",
+          )
+          .bind(pairingId, authentication.installationId),
       ]),
       WORKER_DEPENDENCY_TIMEOUT_MS,
     );
   } catch {
+    return errorResponse(503, "PAIRING_UNAVAILABLE", "Pairing is temporarily unavailable.");
+  }
+
+  const outcome = result[2]?.results[0] as PairingCreationOutcomeRow | undefined;
+  if (outcome?.outcome === "connected") {
+    return errorResponse(409, "ALREADY_CONNECTED", "Telegram is already connected.");
+  }
+
+  if (outcome?.outcome === "unauthorized") {
+    return errorResponse(401, "UNAUTHORIZED", "Installation authentication failed.");
+  }
+
+  if (outcome?.outcome !== "inserted") {
     return errorResponse(503, "PAIRING_UNAVAILABLE", "Pairing is temporarily unavailable.");
   }
 
@@ -181,15 +248,7 @@ export async function getTelegramConnection(request: Request, env: Env): Promise
 
   let installation: TelegramConnectionRow | null;
   try {
-    installation = await withTimeout(
-      env.DB
-        .prepare(
-          "SELECT telegram_chat_id FROM installations WHERE id = ? AND revoked_at IS NULL LIMIT 1",
-        )
-        .bind(authentication.installation.id)
-        .first<TelegramConnectionRow>(),
-      WORKER_DEPENDENCY_TIMEOUT_MS,
-    );
+    installation = await getActiveInstallationTelegramConnection(env.DB, authentication.installation.id);
   } catch {
     return errorResponse(
       503,
