@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import {
 	BackendClient,
 	BackendClientError,
+	TelegramAlreadyConnectedError,
 	type InstallationCredentialStore,
 	type Pairing,
 } from './backend/BackendClient';
@@ -12,35 +13,165 @@ import {
 	statusBarText,
 	type TelegramConnectionState,
 } from './state/TelegramConnectionState';
-import { showTelegramPairingPanel } from './ui/TelegramPairingPanel';
+import {
+	TelegramPairingSession,
+	type PairingSessionState,
+} from './telegram/TelegramPairingSession';
+import { TelegramPairingPanel } from './ui/TelegramPairingPanel';
 
 // This is application-owned, not read from workspace configuration. Replace it when the
 // production Worker URL is provisioned; tests inject their own URL via BackendClient.
 const PRODUCTION_BACKEND_URL = 'https://far-away-from-codex-worker.menesgul.workers.dev';
-const PAIRING_POLL_INTERVAL_MS = 3_000;
-const MAX_PAIRING_POLL_DURATION_MS = 5 * 60 * 1_000;
 
-interface TelegramPairingClient {
+export interface TelegramConnectSession {
+	readonly state: PairingSessionState;
+	reveal(): boolean;
+	dispose(): void;
+	cancel(): void;
+	completeConnected(): void;
+	start(credential: string, pairing: Pairing): Promise<void>;
+}
+
+export interface TelegramConnectSessionCallbacks {
+	onConnected(session: TelegramConnectSession): void;
+	onTerminal(session: TelegramConnectSession, state: Exclude<PairingSessionState, 'starting' | 'waiting'>): void;
+	onDisposed(session: TelegramConnectSession): void;
+}
+
+export interface TelegramConnectClient {
 	ensureInstallation(store: InstallationCredentialStore): Promise<string>;
+	getTelegramConnection(credential: string): Promise<boolean>;
 	createPairing(credential: string): Promise<Pairing>;
 }
 
-type PairingOutcome = 'connected' | 'expired' | 'cancelled';
+export interface TelegramConnectCommandDependencies {
+	client: TelegramConnectClient;
+	store: InstallationCredentialStore;
+	createSession(callbacks: TelegramConnectSessionCallbacks): TelegramConnectSession;
+	applyConnectionState(state: TelegramConnectionState): void;
+	showConnected(): void;
+	showError(message: string): void;
+	now(): number;
+}
 
-export async function createTelegramPairingAndStartPolling(
-	client: TelegramPairingClient,
-	store: InstallationCredentialStore,
-	showPanel: (telegramUrl: string) => Promise<unknown>,
-	poll: (credential: string, pairing: Pairing) => Promise<PairingOutcome>
-): Promise<PairingOutcome> {
-	const credential = await client.ensureInstallation(store);
-	const pairing = await client.createPairing(credential);
-	if (pairing.expiresAt.getTime() <= Date.now()) {
-		throw new BackendClientError('The backend returned an expired pairing.');
-	}
+export interface TelegramConnectCommand {
+	execute(): Promise<void>;
+	dispose(): void;
+	getActiveSession(): TelegramConnectSession | undefined;
+}
 
-	await showPanel(pairing.telegramUrl);
-	return poll(credential, pairing);
+/**
+ * Owns exactly one Connect-command attempt. Keeping this small flow separate
+ * from VS Code command registration makes the active-session and revision
+ * guards explicit while leaving the panel and polling in their own classes.
+ */
+export function createTelegramConnectCommand(
+	dependencies: TelegramConnectCommandDependencies
+): TelegramConnectCommand {
+	let activePairingSession: TelegramConnectSession | undefined;
+	let pairingSessionRevision = 0;
+
+	const execute = async (): Promise<void> => {
+		const existingSession = activePairingSession;
+		if (existingSession !== undefined) {
+			if (existingSession.state === 'expired') {
+				existingSession.dispose();
+				if (activePairingSession === existingSession) {
+					activePairingSession = undefined;
+				}
+			} else {
+				// A starting session has no panel yet; a waiting session reveals its panel.
+				existingSession.reveal();
+				return;
+			}
+		}
+
+		const sessionRevision = ++pairingSessionRevision;
+		let session: TelegramConnectSession;
+		session = dependencies.createSession({
+			onConnected: () => {
+				// Local cancellation does not mean Telegram disconnected. Accept a
+				// late trusted observation until a newer Connect attempt supersedes it.
+				if (sessionRevision === pairingSessionRevision) {
+					dependencies.applyConnectionState('connected');
+				}
+			},
+			onTerminal: (completedSession, state) => {
+				if (activePairingSession !== completedSession) {
+					return;
+				}
+				if (state === 'connected') {
+					dependencies.showConnected();
+				}
+				if (state !== 'expired') {
+					activePairingSession = undefined;
+				}
+			},
+			onDisposed: (disposedSession) => {
+				if (activePairingSession === disposedSession && disposedSession.state === 'expired') {
+					activePairingSession = undefined;
+				}
+			},
+		});
+		// Assign before any asynchronous work, including installation registration.
+		activePairingSession = session;
+
+		try {
+			const credential = await dependencies.client.ensureInstallation(dependencies.store);
+			if (activePairingSession !== session || sessionRevision !== pairingSessionRevision) {
+				return;
+			}
+
+			const connected = await dependencies.client.getTelegramConnection(credential);
+			if (activePairingSession !== session || sessionRevision !== pairingSessionRevision) {
+				return;
+			}
+			if (connected) {
+				session.completeConnected();
+				return;
+			}
+			dependencies.applyConnectionState('disconnected');
+
+			try {
+				const pairing = await dependencies.client.createPairing(credential);
+				if (activePairingSession !== session || sessionRevision !== pairingSessionRevision) {
+					return;
+				}
+				if (pairing.expiresAt.getTime() <= dependencies.now()) {
+					throw new BackendClientError('The backend returned an expired pairing.');
+				}
+				await session.start(credential, pairing);
+			} catch (error) {
+				if (!(error instanceof TelegramAlreadyConnectedError)) {
+					throw error;
+				}
+
+				// Pairing creation raced with a server-side connection; resolve it using
+				// the existing authoritative endpoint rather than creating another pairing.
+				if (await dependencies.client.getTelegramConnection(credential)) {
+					if (activePairingSession === session && sessionRevision === pairingSessionRevision) {
+						session.completeConnected();
+					}
+					return;
+				}
+				throw error;
+			}
+		} catch (error) {
+			if (activePairingSession === session) {
+				session.cancel();
+			}
+			dependencies.showError(safeErrorMessage(error, 'Could not connect Telegram.'));
+		}
+	};
+
+	return {
+		execute,
+		dispose: () => {
+			activePairingSession?.dispose();
+			activePairingSession = undefined;
+		},
+		getActiveSession: () => activePairingSession,
+	};
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -50,7 +181,6 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 	const secretStore = new SecretStore(context.secrets);
 	const backendClient = new BackendClient(PRODUCTION_BACKEND_URL);
-	let pairingInProgress = false;
 	let alertsEnabled = false;
 	let connectionState: TelegramConnectionState = 'unknown';
 	let connectionStateRevision = 0;
@@ -111,36 +241,25 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	);
 
+	const connectFlow = createTelegramConnectCommand({
+		client: backendClient,
+		store: secretStore,
+		createSession: (callbacks) => new TelegramPairingSession({
+			client: backendClient,
+			createPanel: TelegramPairingPanel.create,
+			writeClipboard: (telegramUrl) => vscode.env.clipboard.writeText(telegramUrl),
+			openExternal: (telegramUrl) => vscode.env.openExternal(vscode.Uri.parse(telegramUrl)),
+			...callbacks,
+		}),
+		applyConnectionState,
+		showConnected: () => { void vscode.window.showInformationMessage('Telegram is connected.'); },
+		showError: (message) => { void vscode.window.showErrorMessage(message); },
+		now: () => Date.now(),
+	});
+
 	const connectTelegramCommand = vscode.commands.registerCommand(
 		'far-away-from-codex.connectTelegram',
-		async () => {
-			if (pairingInProgress) {
-				void vscode.window.showInformationMessage('A Telegram pairing is already in progress.');
-				return;
-			}
-
-			pairingInProgress = true;
-			try {
-				const outcome = await createTelegramPairingAndStartPolling(
-					backendClient,
-					secretStore,
-					showTelegramPairingPanel,
-					(credential, pairing) => pollForPairing(backendClient, credential, pairing)
-				);
-				if (outcome === 'connected') {
-					applyConnectionState('connected');
-					void vscode.window.showInformationMessage('Telegram is connected.');
-				} else if (outcome === 'expired') {
-					void vscode.window.showErrorMessage('Telegram pairing expired. Please try again.');
-				} else {
-					void vscode.window.showInformationMessage('Telegram pairing was cancelled.');
-				}
-			} catch (error) {
-				void vscode.window.showErrorMessage(safeErrorMessage(error, 'Could not connect Telegram.'));
-			} finally {
-				pairingInProgress = false;
-			}
-		}
+		connectFlow.execute
 	);
 
 	const disconnectTelegramCommand = vscode.commands.registerCommand(
@@ -173,6 +292,11 @@ export function activate(context: vscode.ExtensionContext) {
 	void refreshConnectionState();
 
 	context.subscriptions.push(
+		{
+			dispose: () => {
+				connectFlow.dispose();
+			},
+		},
 		statusBarItem,
 		toggleCommand,
 		connectTelegramCommand,
@@ -182,61 +306,6 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {}
-
-async function pollForPairing(
-	client: BackendClient,
-	credential: string,
-	pairing: Pairing
-): Promise<PairingOutcome> {
-	const deadline = Math.min(
-		pairing.expiresAt.getTime(),
-		Date.now() + MAX_PAIRING_POLL_DURATION_MS
-	);
-
-	return vscode.window.withProgress(
-		{
-			location: vscode.ProgressLocation.Notification,
-			title: 'Waiting for Telegram pairing',
-			cancellable: true,
-		},
-		async (_progress, cancellationToken) => {
-			while (!cancellationToken.isCancellationRequested && Date.now() < deadline) {
-				const status = await client.getPairingStatus(credential, pairing.pairingId);
-				if (cancellationToken.isCancellationRequested) {
-					return 'cancelled';
-				}
-				if (status === 'connected' || status === 'expired') {
-					return status;
-				}
-
-				if (!await waitForNextPoll(cancellationToken, deadline)) {
-					return cancellationToken.isCancellationRequested ? 'cancelled' : 'expired';
-				}
-			}
-
-			return cancellationToken.isCancellationRequested ? 'cancelled' : 'expired';
-		}
-	);
-}
-
-function waitForNextPoll(token: vscode.CancellationToken, deadline: number): Promise<boolean> {
-	const remaining = deadline - Date.now();
-	if (remaining <= 0 || token.isCancellationRequested) {
-		return Promise.resolve(false);
-	}
-
-	return new Promise((resolve) => {
-		const timeout = setTimeout(() => {
-			disposable.dispose();
-			resolve(true);
-		}, Math.min(PAIRING_POLL_INTERVAL_MS, remaining));
-		const disposable = token.onCancellationRequested(() => {
-			clearTimeout(timeout);
-			disposable.dispose();
-			resolve(false);
-		});
-	});
-}
 
 function safeErrorMessage(error: unknown, fallback: string): string {
 	return error instanceof BackendClientError ? error.message : fallback;
