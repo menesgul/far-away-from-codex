@@ -12,6 +12,8 @@ import {
 	type PairingStatus,
 } from '../backend/BackendClient';
 import {
+	createTelegramAlertsToggleCommand,
+	createTelegramConnectionStateRefresh,
 	createTelegramConnectCommand,
 	type TelegramConnectSession,
 	type TelegramConnectSessionCallbacks,
@@ -22,6 +24,7 @@ import {
 	resolveTelegramConnectionState,
 	statusBarText,
 	type TelegramConnectionClient,
+	type TelegramConnectionState,
 } from '../state/TelegramConnectionState';
 import {
 	generateTelegramPairingQrDataUri,
@@ -264,10 +267,13 @@ function createConnectCommandHarness(options: {
 	ensureInstallation?: () => Promise<string>;
 	getTelegramConnection?: () => Promise<boolean>;
 	createPairing?: () => Promise<Pairing>;
+	now?: () => number;
 } = {}) {
 	const sessions: FakeConnectSession[] = [];
 	const appliedStates: string[] = [];
 	const messages: string[] = [];
+	let enabledAfterConnectCalls = 0;
+	let connectionStateRevision = 0;
 	let ensureCalls = 0;
 	let connectionCalls = 0;
 	let pairingCalls = 0;
@@ -292,10 +298,15 @@ function createConnectCommandHarness(options: {
 			sessions.push(session);
 			return session;
 		},
-		applyConnectionState: (state) => appliedStates.push(state),
+		applyConnectionState: (state) => {
+			appliedStates.push(state);
+			connectionStateRevision += 1;
+		},
+		enableAlertsAfterConnect: () => { enabledAfterConnectCalls += 1; },
+		getConnectionStateRevision: () => connectionStateRevision,
 		showConnected: () => messages.push('connected'),
 		showError: (message) => messages.push(message),
-		now: () => Date.now(),
+		now: options.now ?? (() => Date.now()),
 	});
 
 	return {
@@ -303,9 +314,129 @@ function createConnectCommandHarness(options: {
 		sessions,
 		appliedStates,
 		messages,
+		get enabledAfterConnectCalls() { return enabledAfterConnectCalls; },
+		get connectionStateRevision() { return connectionStateRevision; },
 		get ensureCalls() { return ensureCalls; },
 		get connectionCalls() { return connectionCalls; },
 		get pairingCalls() { return pairingCalls; },
+		applyExternalConnectionState: (state: string) => {
+			appliedStates.push(state);
+			connectionStateRevision += 1;
+		},
+	};
+}
+
+function createToggleCommandHarness(options: {
+	connectionState: 'connected' | 'disconnected' | 'unknown';
+	alertsEnabled?: boolean;
+	refreshResult?: 'connected' | 'disconnected' | 'unknown';
+	promptResult?: 'connect' | 'cancel' | undefined;
+}): {
+	command: () => Promise<void>;
+	getConnectionState(): 'connected' | 'disconnected' | 'unknown';
+	getAlertsEnabled(): boolean;
+	readonly refreshCalls: number;
+	readonly promptCalls: number;
+	readonly connectIntents: string[];
+} {
+	let connectionState = options.connectionState;
+	let alertsEnabled = options.alertsEnabled ?? false;
+	let refreshCalls = 0;
+	let promptCalls = 0;
+	const connectIntents: string[] = [];
+	const command = createTelegramAlertsToggleCommand({
+		getConnectionState: () => connectionState,
+		getAlertsEnabled: () => alertsEnabled,
+		setAlertsEnabled: (enabled) => { alertsEnabled = enabled; },
+		refreshConnectionState: async () => {
+			refreshCalls += 1;
+			connectionState = options.refreshResult ?? connectionState;
+		},
+		showDisconnectedPrompt: async () => {
+			promptCalls += 1;
+			return options.promptResult;
+		},
+		connectTelegram: async (intent) => { connectIntents.push(intent); },
+	});
+
+	return {
+		command,
+		getConnectionState: () => connectionState,
+		getAlertsEnabled: () => alertsEnabled,
+		get refreshCalls() { return refreshCalls; },
+		get promptCalls() { return promptCalls; },
+		get connectIntents() { return connectIntents; },
+	};
+}
+
+function createConnectionOrchestrationHarness(): {
+	connect: ReturnType<typeof createTelegramConnectCommand>;
+	refreshConnectionState(): Promise<void>;
+	refreshResult: Deferred<TelegramConnectionState>;
+	sessions: FakeConnectSession[];
+	appliedStates: TelegramConnectionState[];
+	getConnectionState(): TelegramConnectionState;
+	getAlertsEnabled(): boolean;
+	getConnectionStateRevision(): number;
+	applyNewerState(state: TelegramConnectionState): void;
+} {
+	let connectionState: TelegramConnectionState = 'disconnected';
+	let alertsEnabled = false;
+	let connectionStateRevision = 0;
+	const refreshResult = new Deferred<TelegramConnectionState>();
+	const sessions: FakeConnectSession[] = [];
+	const appliedStates: TelegramConnectionState[] = [];
+	const applyConnectionState = (state: TelegramConnectionState) => {
+		connectionStateRevision += 1;
+		connectionState = state;
+		appliedStates.push(state);
+		if (!canEnableAlerts(state)) {
+			alertsEnabled = false;
+		}
+	};
+	const connect = createTelegramConnectCommand({
+		client: {
+			ensureInstallation: async () => INSTALLATION_CREDENTIAL,
+			getTelegramConnection: async () => false,
+			createPairing: async () => futurePairing(Date.now() + 60_000),
+		},
+		store: new FakeCredentialStore(),
+		createSession: (callbacks) => {
+			const session = new FakeConnectSession(callbacks);
+			sessions.push(session);
+			return session;
+		},
+		applyConnectionState,
+		enableAlertsAfterConnect: () => {
+			if (canEnableAlerts(connectionState)) {
+				alertsEnabled = true;
+			}
+		},
+		getConnectionStateRevision: () => connectionStateRevision,
+		showConnected: () => undefined,
+		showError: () => undefined,
+		now: () => Date.now(),
+	});
+	const refreshConnectionState = createTelegramConnectionStateRefresh({
+		resolveConnectionState: () => refreshResult.promise,
+		beginAuthoritativeRefresh: () => {
+			connectionStateRevision += 1;
+			return connectionStateRevision;
+		},
+		getConnectionStateRevision: () => connectionStateRevision,
+		applyConnectionState,
+	});
+
+	return {
+		connect,
+		refreshConnectionState,
+		refreshResult,
+		sessions,
+		appliedStates,
+		getConnectionState: () => connectionState,
+		getAlertsEnabled: () => alertsEnabled,
+		getConnectionStateRevision: () => connectionStateRevision,
+		applyNewerState: applyConnectionState,
 	};
 }
 
@@ -693,6 +824,229 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(canEnableAlerts('unknown'), false);
 	});
 
+	test('OFF connected status-bar click enables alerts', async () => {
+		const harness = createToggleCommandHarness({ connectionState: 'connected' });
+
+		await harness.command();
+
+		assert.strictEqual(harness.getConnectionState(), 'connected');
+		assert.strictEqual(harness.getAlertsEnabled(), true);
+		assert.strictEqual(harness.refreshCalls, 0);
+		assert.strictEqual(harness.promptCalls, 0);
+		assert.deepStrictEqual(harness.connectIntents, []);
+	});
+
+	test('ON connected status-bar click disables alerts', async () => {
+		const harness = createToggleCommandHarness({ connectionState: 'connected', alertsEnabled: true });
+
+		await harness.command();
+
+		assert.strictEqual(harness.getConnectionState(), 'connected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(harness.refreshCalls, 0);
+		assert.strictEqual(harness.promptCalls, 0);
+		assert.deepStrictEqual(harness.connectIntents, []);
+	});
+
+	test('OFF disconnected status-bar click only offers Connect and performs no backend or pairing work', async () => {
+		const harness = createToggleCommandHarness({ connectionState: 'disconnected' });
+
+		await harness.command();
+
+		assert.strictEqual(harness.getConnectionState(), 'disconnected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(harness.refreshCalls, 0);
+		assert.strictEqual(harness.promptCalls, 1);
+		assert.deepStrictEqual(harness.connectIntents, []);
+	});
+
+	test('dismissing the OFF disconnected prompt is a local no-op and preserves lazy registration', async () => {
+		const harness = createToggleCommandHarness({
+			connectionState: 'disconnected',
+			promptResult: 'cancel',
+		});
+
+		await harness.command();
+
+		assert.strictEqual(harness.getConnectionState(), 'disconnected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(harness.refreshCalls, 0);
+		assert.strictEqual(harness.promptCalls, 1);
+		assert.deepStrictEqual(harness.connectIntents, []);
+	});
+
+	test('OFF disconnected Connect CTA routes to the existing flow with enable-after-connect intent', async () => {
+		const harness = createToggleCommandHarness({
+			connectionState: 'disconnected',
+			promptResult: 'connect',
+		});
+
+		await harness.command();
+
+		assert.strictEqual(harness.refreshCalls, 0);
+		assert.strictEqual(harness.promptCalls, 1);
+		assert.deepStrictEqual(harness.connectIntents, ['enable-alerts-after-connect']);
+	});
+
+	test('OFF unknown status-bar retry renders connected but leaves alerts OFF until a second click', async () => {
+		const harness = createToggleCommandHarness({
+			connectionState: 'unknown',
+			refreshResult: 'connected',
+		});
+
+		await harness.command();
+
+		assert.strictEqual(harness.refreshCalls, 1);
+		assert.strictEqual(harness.getConnectionState(), 'connected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(harness.promptCalls, 0);
+		assert.deepStrictEqual(harness.connectIntents, []);
+
+		await harness.command();
+
+		assert.strictEqual(harness.getAlertsEnabled(), true);
+		assert.strictEqual(harness.refreshCalls, 1);
+		assert.strictEqual(harness.promptCalls, 0);
+	});
+
+	test('OFF unknown status-bar retry renders disconnected without a same-click Connect prompt', async () => {
+		const harness = createToggleCommandHarness({
+			connectionState: 'unknown',
+			refreshResult: 'disconnected',
+			promptResult: 'cancel',
+		});
+
+		await harness.command();
+
+		assert.strictEqual(harness.refreshCalls, 1);
+		assert.strictEqual(harness.getConnectionState(), 'disconnected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(harness.promptCalls, 0);
+		assert.deepStrictEqual(harness.connectIntents, []);
+
+		await harness.command();
+
+		assert.strictEqual(harness.promptCalls, 1);
+		assert.deepStrictEqual(harness.connectIntents, []);
+	});
+
+	test('OFF unknown status-bar retry stays unknown after a transient outcome and never creates pairing material', async () => {
+		const harness = createToggleCommandHarness({
+			connectionState: 'unknown',
+			refreshResult: 'unknown',
+		});
+
+		await harness.command();
+
+		assert.strictEqual(harness.refreshCalls, 1);
+		assert.strictEqual(harness.getConnectionState(), 'unknown');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(harness.promptCalls, 0);
+		assert.deepStrictEqual(harness.connectIntents, []);
+	});
+
+	test('OFF unknown rejected-credential recovery renders disconnected without a same-click Connect prompt', async () => {
+		const harness = createToggleCommandHarness({
+			connectionState: 'unknown',
+			// resolveTelegramConnectionState maps a definitive credential rejection to disconnected.
+			refreshResult: 'disconnected',
+			promptResult: 'connect',
+		});
+
+		await harness.command();
+
+		assert.strictEqual(harness.getConnectionState(), 'disconnected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(harness.promptCalls, 0);
+		assert.deepStrictEqual(harness.connectIntents, []);
+	});
+
+	test('starting a newer authoritative refresh immediately fences an older enable pairing session', async () => {
+		const harness = createConnectionOrchestrationHarness();
+		await harness.connect.execute('enable-alerts-after-connect');
+		const session = harness.sessions[0];
+		const statesBeforeRefresh = [...harness.appliedStates];
+
+		const refresh = harness.refreshConnectionState();
+		const refreshRevision = harness.getConnectionStateRevision();
+		session.emitConnected();
+		session.emitTerminal('connected');
+
+		assert.strictEqual(harness.getConnectionStateRevision(), refreshRevision);
+		assert.deepStrictEqual(harness.appliedStates, statesBeforeRefresh);
+		assert.strictEqual(harness.getConnectionState(), 'disconnected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+
+		harness.refreshResult.resolve('connected');
+		await refresh;
+		assert.strictEqual(harness.getConnectionState(), 'connected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		harness.connect.dispose();
+	});
+
+	test('a newer refresh connected result controls state without stale-session auto-enable', async () => {
+		const harness = createConnectionOrchestrationHarness();
+		await harness.connect.execute('enable-alerts-after-connect');
+		const refresh = harness.refreshConnectionState();
+
+		harness.sessions[0].emitConnected();
+		harness.sessions[0].emitTerminal('connected');
+		harness.refreshResult.resolve('connected');
+		await refresh;
+
+		assert.strictEqual(harness.getConnectionState(), 'connected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(statusBarText(harness.getConnectionState(), harness.getAlertsEnabled()),
+			'$(bell-slash) Codex Alerts: OFF · $(send) ✓');
+		harness.connect.dispose();
+	});
+
+	test('a newer refresh disconnected result cannot be overwritten by a stale pairing session', async () => {
+		const harness = createConnectionOrchestrationHarness();
+		await harness.connect.execute('enable-alerts-after-connect');
+		const refresh = harness.refreshConnectionState();
+
+		harness.sessions[0].emitConnected();
+		harness.sessions[0].emitTerminal('connected');
+		harness.refreshResult.resolve('disconnected');
+		await refresh;
+
+		assert.strictEqual(harness.getConnectionState(), 'disconnected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(statusBarText(harness.getConnectionState(), harness.getAlertsEnabled()),
+			'$(bell-slash) Codex Alerts: OFF · $(send) ✕');
+		harness.connect.dispose();
+	});
+
+	test('a newer refresh unknown result keeps alerts OFF while a stale pairing settles', async () => {
+		const harness = createConnectionOrchestrationHarness();
+		await harness.connect.execute('enable-alerts-after-connect');
+		const refresh = harness.refreshConnectionState();
+
+		harness.sessions[0].emitConnected();
+		harness.sessions[0].emitTerminal('connected');
+		harness.refreshResult.resolve('unknown');
+		await refresh;
+
+		assert.strictEqual(harness.getConnectionState(), 'unknown');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+		assert.strictEqual(statusBarText(harness.getConnectionState(), harness.getAlertsEnabled()),
+			'$(bell-slash) Codex Alerts: OFF · $(send) ?');
+		harness.connect.dispose();
+	});
+
+	test('an old refresh result cannot overwrite a newer authoritative connection mutation', async () => {
+		const harness = createConnectionOrchestrationHarness();
+		const refresh = harness.refreshConnectionState();
+		harness.applyNewerState('connected');
+
+		harness.refreshResult.resolve('disconnected');
+		await refresh;
+
+		assert.strictEqual(harness.getConnectionState(), 'connected');
+		assert.strictEqual(harness.getAlertsEnabled(), false);
+	});
+
 	test('disconnectTelegram sends an authenticated delete without clearing the installation credential', async () => {
 		let method: string | undefined;
 		let authorization: string | undefined;
@@ -1073,6 +1427,153 @@ suite('Extension Test Suite', () => {
 		harness.command.dispose();
 	});
 
+	test('Command Palette Connect remains connect-only after a successful pairing', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute();
+
+		harness.sessions[0].emitConnected();
+		harness.sessions[0].emitTerminal('connected');
+
+		assert.strictEqual(harness.enabledAfterConnectCalls, 0);
+		harness.command.dispose();
+	});
+
+	test('Command Palette Connect observes an already-connected Telegram without pairing or enabling alerts', async () => {
+		const harness = createConnectCommandHarness({ getTelegramConnection: async () => true });
+
+		await harness.command.execute();
+
+		assert.strictEqual(harness.sessions.length, 1);
+		assert.strictEqual(harness.pairingCalls, 0);
+		assert.deepStrictEqual(harness.appliedStates, ['connected']);
+		assert.strictEqual(harness.enabledAfterConnectCalls, 0);
+		assert.deepStrictEqual(harness.messages, ['connected']);
+		harness.command.dispose();
+	});
+
+	test('an enable-after-connect pairing enables alerts only after its normal connected terminal', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute('enable-alerts-after-connect');
+
+		const session = harness.sessions[0];
+		session.emitConnected();
+		assert.strictEqual(harness.enabledAfterConnectCalls, 0);
+		session.emitTerminal('connected');
+
+		assert.strictEqual(harness.enabledAfterConnectCalls, 1);
+		harness.command.dispose();
+	});
+
+	test('an existing connect-only session upgrades monotonically to enable alerts', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute();
+		const session = harness.sessions[0];
+
+		await harness.command.execute('enable-alerts-after-connect');
+		await harness.command.execute('connect-only');
+		assert.strictEqual(harness.sessions.length, 1);
+		assert.strictEqual(harness.pairingCalls, 1);
+
+		session.emitConnected();
+		session.emitTerminal('connected');
+		assert.strictEqual(harness.enabledAfterConnectCalls, 1);
+		harness.command.dispose();
+	});
+
+	test('a status-bar enable request upgrades a starting session without duplicate registration or pairing', async () => {
+		const installation = new Deferred<string>();
+		const harness = createConnectCommandHarness({ ensureInstallation: () => installation.promise });
+		const paletteConnect = harness.command.execute('connect-only');
+		await settlePromises();
+
+		await harness.command.execute('enable-alerts-after-connect');
+		assert.strictEqual(harness.sessions.length, 1);
+		assert.strictEqual(harness.ensureCalls, 1);
+		assert.strictEqual(harness.connectionCalls, 0);
+		assert.strictEqual(harness.pairingCalls, 0);
+
+		installation.resolve(INSTALLATION_CREDENTIAL);
+		await paletteConnect;
+		assert.strictEqual(harness.pairingCalls, 1);
+		harness.sessions[0].emitConnected();
+		harness.sessions[0].emitTerminal('connected');
+		assert.strictEqual(harness.enabledAfterConnectCalls, 1);
+		harness.command.dispose();
+	});
+
+	test('a cancelled session can report late connection state without enabling alerts', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute('enable-alerts-after-connect');
+		const session = harness.sessions[0];
+
+		session.emitTerminal('cancelled');
+		session.emitConnected();
+
+		assert.deepStrictEqual(harness.appliedStates, ['disconnected', 'connected']);
+		assert.strictEqual(harness.enabledAfterConnectCalls, 0);
+		harness.command.dispose();
+	});
+
+	test('Cancel preserves a late in-flight connection GET without enabling alerts', async () => {
+		const lookup = new Deferred<boolean>();
+		const harness = createConnectCommandHarness({ getTelegramConnection: () => lookup.promise });
+		const connect = harness.command.execute('enable-alerts-after-connect');
+		await settlePromises();
+		const session = harness.sessions[0];
+
+		session.emitTerminal('cancelled');
+		lookup.resolve(true);
+		await connect;
+
+		assert.deepStrictEqual(harness.appliedStates, ['connected']);
+		assert.strictEqual(harness.enabledAfterConnectCalls, 0);
+		harness.command.dispose();
+	});
+
+	test('a newer connection-state owner prevents a stale connected terminal from enabling alerts', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute('enable-alerts-after-connect');
+		const session = harness.sessions[0];
+
+		session.emitConnected();
+		harness.applyExternalConnectionState('connected');
+		session.emitTerminal('connected');
+
+		assert.strictEqual(harness.enabledAfterConnectCalls, 0);
+		harness.command.dispose();
+	});
+
+	test('an expired pairing never enables alerts', async () => {
+		const harness = createConnectCommandHarness({
+			createPairing: async () => futurePairing(99),
+			now: () => 100,
+		});
+
+		await harness.command.execute('enable-alerts-after-connect');
+
+		assert.strictEqual(harness.sessions.length, 1);
+		assert.strictEqual(harness.sessions[0].state, 'cancelled');
+		assert.strictEqual(harness.enabledAfterConnectCalls, 0);
+		assert.strictEqual(harness.command.getActiveSession(), undefined);
+		harness.command.dispose();
+	});
+
+	test('a stale old connected terminal cannot enable alerts after a newer Connect generation', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute('enable-alerts-after-connect');
+		const firstSession = harness.sessions[0];
+		firstSession.emitTerminal('cancelled');
+
+		await harness.command.execute('connect-only');
+		const secondSession = harness.sessions[1];
+		firstSession.emitConnected();
+		firstSession.emitTerminal('connected');
+
+		assert.strictEqual(harness.command.getActiveSession(), secondSession);
+		assert.strictEqual(harness.enabledAfterConnectCalls, 0);
+		harness.command.dispose();
+	});
+
 	test('stale connected observations cannot overwrite a newer Connect generation', async () => {
 		const harness = createConnectCommandHarness();
 		await harness.command.execute();
@@ -1129,24 +1630,25 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(extensionSource.includes('withProgress'), false);
 		assert.ok(extensionSource.includes('getTelegramConnection(credential)'));
 		assert.ok(extensionSource.includes('createPairing(credential)'));
+		assert.ok(extensionSource.includes('createTelegramAlertsToggleCommand'));
 		assert.ok(extensionSource.includes("if (existingSession.state === 'expired')"));
 		assert.ok(extensionSource.includes('existingSession.reveal();'));
 		assert.ok(extensionSource.includes('activePairingSession = session;'));
 		assert.ok(extensionSource.includes('if (activePairingSession !== session || sessionRevision !== pairingSessionRevision)'));
 		assert.ok(extensionSource.includes('if (activePairingSession !== completedSession)'));
-		assert.ok(extensionSource.includes('if (sessionRevision === pairingSessionRevision)'));
+		assert.ok(extensionSource.includes('sessionConnectionStateRevision === dependencies.getConnectionStateRevision()'));
 		assert.ok(sessionSource.includes('DEFAULT_POLL_INTERVAL_MS = 3_000'));
 		assert.ok(sessionSource.includes('pollInFlight'));
 		assert.ok(extensionSource.includes("let alertsEnabled = false"));
 		assert.ok(extensionSource.includes("let connectionState: TelegramConnectionState = 'unknown'"));
 		assert.ok(extensionSource.includes('let connectionStateRevision = 0'));
-		assert.ok(extensionSource.includes('connectionRefreshInFlight'));
-		assert.ok(extensionSource.includes('if (connectionRefreshInFlight !== undefined)'));
-		assert.ok(extensionSource.includes('return connectionRefreshInFlight;'));
-		assert.ok(extensionSource.includes('if (connectionStateRevision === refreshRevision)'));
+		assert.ok(extensionSource.includes('createTelegramConnectionStateRefresh'));
+		assert.ok(extensionSource.includes('beginAuthoritativeRefresh'));
+		assert.ok(extensionSource.includes('const refreshRevision = dependencies.beginAuthoritativeRefresh()'));
+		assert.ok(extensionSource.includes('dependencies.getConnectionStateRevision() === refreshRevision'));
 		assert.ok(extensionSource.includes('void refreshConnectionState();'));
-		assert.ok(extensionSource.includes("applyConnectionState('connected')"));
-		assert.ok(extensionSource.includes("applyConnectionState('disconnected')"));
+		assert.ok(extensionSource.includes("applySessionConnectionState('connected')"));
+		assert.ok(extensionSource.includes("applySessionConnectionState('disconnected')"));
 	});
 
 	test('pairing material is not persisted by extension state', () => {

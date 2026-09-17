@@ -23,6 +23,10 @@ import { TelegramPairingPanel } from './ui/TelegramPairingPanel';
 // production Worker URL is provisioned; tests inject their own URL via BackendClient.
 const PRODUCTION_BACKEND_URL = 'https://far-away-from-codex-worker.menesgul.workers.dev';
 
+export type TelegramConnectIntent =
+	| 'connect-only'
+	| 'enable-alerts-after-connect';
+
 export interface TelegramConnectSession {
 	readonly state: PairingSessionState;
 	reveal(): boolean;
@@ -49,15 +53,97 @@ export interface TelegramConnectCommandDependencies {
 	store: InstallationCredentialStore;
 	createSession(callbacks: TelegramConnectSessionCallbacks): TelegramConnectSession;
 	applyConnectionState(state: TelegramConnectionState): void;
+	/** Enables alerts only after this command has verified a normal connected terminal state. */
+	enableAlertsAfterConnect(): void;
+	/** The extension-owned revision used to reject stale session side effects. */
+	getConnectionStateRevision(): number;
 	showConnected(): void;
 	showError(message: string): void;
 	now(): number;
 }
 
 export interface TelegramConnectCommand {
-	execute(): Promise<void>;
+	execute(intent?: TelegramConnectIntent): Promise<void>;
 	dispose(): void;
 	getActiveSession(): TelegramConnectSession | undefined;
+}
+
+export interface TelegramAlertsToggleCommandDependencies {
+	getConnectionState(): TelegramConnectionState;
+	getAlertsEnabled(): boolean;
+	setAlertsEnabled(enabled: boolean): void;
+	refreshConnectionState(): Promise<void>;
+	showDisconnectedPrompt(): Promise<'connect' | 'cancel' | undefined>;
+	connectTelegram(intent: TelegramConnectIntent): Promise<void>;
+}
+
+/**
+ * Routes a status-bar click from extension-owned state. The function owns no
+ * state itself, keeping the activation lifecycle as the single owner while
+ * making the canonical click behavior independently testable.
+ */
+export function createTelegramAlertsToggleCommand(
+	dependencies: TelegramAlertsToggleCommandDependencies
+): () => Promise<void> {
+	return async () => {
+		const connectionState = dependencies.getConnectionState();
+		if (connectionState === 'unknown') {
+			await dependencies.refreshConnectionState();
+			// An unknown-state click is solely an authoritative retry. The result
+			// changes the rendered state; a separate click performs its action.
+			return;
+		}
+
+		if (connectionState === 'connected') {
+			dependencies.setAlertsEnabled(!dependencies.getAlertsEnabled());
+			return;
+		}
+
+		if (connectionState === 'disconnected') {
+			if (await dependencies.showDisconnectedPrompt() === 'connect') {
+				await dependencies.connectTelegram('enable-alerts-after-connect');
+			}
+		}
+	};
+}
+
+export interface TelegramConnectionStateRefreshDependencies {
+	resolveConnectionState(): Promise<TelegramConnectionState>;
+	beginAuthoritativeRefresh(): number;
+	getConnectionStateRevision(): number;
+	applyConnectionState(state: TelegramConnectionState): void;
+}
+
+/**
+ * Starts a single authoritative connection read. Beginning the read advances
+ * the caller-owned revision immediately, so older pairing sessions lose
+ * permission to mutate connection state before the network request settles.
+ */
+export function createTelegramConnectionStateRefresh(
+	dependencies: TelegramConnectionStateRefreshDependencies
+): () => Promise<void> {
+	let inFlight: Promise<void> | undefined;
+
+	return (): Promise<void> => {
+		if (inFlight !== undefined) {
+			return inFlight;
+		}
+
+		const refreshRevision = dependencies.beginAuthoritativeRefresh();
+		const refresh = dependencies.resolveConnectionState()
+			.then((nextState) => {
+				if (dependencies.getConnectionStateRevision() === refreshRevision) {
+					dependencies.applyConnectionState(nextState);
+				}
+			});
+		inFlight = refresh;
+		void refresh.finally(() => {
+			if (inFlight === refresh) {
+				inFlight = undefined;
+			}
+		});
+		return refresh;
+	};
 }
 
 /**
@@ -70,8 +156,9 @@ export function createTelegramConnectCommand(
 ): TelegramConnectCommand {
 	let activePairingSession: TelegramConnectSession | undefined;
 	let pairingSessionRevision = 0;
+	let activeIntent: TelegramConnectIntent = 'connect-only';
 
-	const execute = async (): Promise<void> => {
+	const execute = async (intent: TelegramConnectIntent = 'connect-only'): Promise<void> => {
 		const existingSession = activePairingSession;
 		if (existingSession !== undefined) {
 			if (existingSession.state === 'expired') {
@@ -80,6 +167,11 @@ export function createTelegramConnectCommand(
 					activePairingSession = undefined;
 				}
 			} else {
+				// A status-bar request may raise the desired post-connect action, but a
+				// later palette invocation must never lower it during this session.
+				if (intent === 'enable-alerts-after-connect') {
+					activeIntent = intent;
+				}
 				// A starting session has no panel yet; a waiting session reveals its panel.
 				existingSession.reveal();
 				return;
@@ -87,14 +179,27 @@ export function createTelegramConnectCommand(
 		}
 
 		const sessionRevision = ++pairingSessionRevision;
+		activeIntent = intent;
+		let sessionConnectionStateRevision = dependencies.getConnectionStateRevision();
+		const applySessionConnectionState = (state: TelegramConnectionState): boolean => {
+			// A cancellation may still receive a late trusted connected observation,
+			// but a newer command or connection-state owner always wins.
+			if (
+				sessionRevision !== pairingSessionRevision
+				|| sessionConnectionStateRevision !== dependencies.getConnectionStateRevision()
+			) {
+				return false;
+			}
+			dependencies.applyConnectionState(state);
+			sessionConnectionStateRevision = dependencies.getConnectionStateRevision();
+			return true;
+		};
 		let session: TelegramConnectSession;
 		session = dependencies.createSession({
 			onConnected: () => {
 				// Local cancellation does not mean Telegram disconnected. Accept a
 				// late trusted observation until a newer Connect attempt supersedes it.
-				if (sessionRevision === pairingSessionRevision) {
-					dependencies.applyConnectionState('connected');
-				}
+				applySessionConnectionState('connected');
 			},
 			onTerminal: (completedSession, state) => {
 				if (activePairingSession !== completedSession) {
@@ -102,6 +207,13 @@ export function createTelegramConnectCommand(
 				}
 				if (state === 'connected') {
 					dependencies.showConnected();
+					if (
+						activeIntent === 'enable-alerts-after-connect'
+						&& sessionRevision === pairingSessionRevision
+						&& sessionConnectionStateRevision === dependencies.getConnectionStateRevision()
+					) {
+						dependencies.enableAlertsAfterConnect();
+					}
 				}
 				if (state !== 'expired') {
 					activePairingSession = undefined;
@@ -123,14 +235,23 @@ export function createTelegramConnectCommand(
 			}
 
 			const connected = await dependencies.client.getTelegramConnection(credential);
-			if (activePairingSession !== session || sessionRevision !== pairingSessionRevision) {
+			if (sessionRevision !== pairingSessionRevision) {
+				return;
+			}
+			if (activePairingSession !== session) {
+				// A Cancel never revokes the server-side pairing or disbelieves a GET
+				// already in flight. Preserve a late trusted connected observation, but
+				// never resume the session or create pairing material after cancellation.
+				if (connected) {
+					applySessionConnectionState('connected');
+				}
 				return;
 			}
 			if (connected) {
 				session.completeConnected();
 				return;
 			}
-			dependencies.applyConnectionState('disconnected');
+			applySessionConnectionState('disconnected');
 
 			try {
 				const pairing = await dependencies.client.createPairing(credential);
@@ -167,6 +288,7 @@ export function createTelegramConnectCommand(
 	return {
 		execute,
 		dispose: () => {
+			pairingSessionRevision += 1;
 			activePairingSession?.dispose();
 			activePairingSession = undefined;
 		},
@@ -184,7 +306,6 @@ export function activate(context: vscode.ExtensionContext) {
 	let alertsEnabled = false;
 	let connectionState: TelegramConnectionState = 'unknown';
 	let connectionStateRevision = 0;
-	let connectionRefreshInFlight: Promise<void> | undefined;
 
 	statusBarItem.command = 'far-away-from-codex.toggleAlerts';
 	statusBarItem.tooltip = 'Click to enable or disable Codex phone alerts';
@@ -202,44 +323,15 @@ export function activate(context: vscode.ExtensionContext) {
 		updateStatusBar();
 	};
 
-	const refreshConnectionState = (): Promise<void> => {
-		if (connectionRefreshInFlight !== undefined) {
-			return connectionRefreshInFlight;
-		}
-
-		const refreshRevision = connectionStateRevision;
-		const refresh = resolveTelegramConnectionState(secretStore, backendClient)
-			.then((nextState) => {
-				if (connectionStateRevision === refreshRevision) {
-					applyConnectionState(nextState);
-				}
-			});
-		connectionRefreshInFlight = refresh;
-		void refresh.finally(() => {
-			if (connectionRefreshInFlight === refresh) {
-				connectionRefreshInFlight = undefined;
-			}
-		});
-		return refresh;
-	};
-
-	const toggleCommand = vscode.commands.registerCommand(
-		'far-away-from-codex.toggleAlerts',
-		() => {
-			if (connectionState === 'unknown') {
-				void refreshConnectionState();
-				return;
-			}
-
-			if (!canEnableAlerts(connectionState)) {
-				void vscode.window.showInformationMessage('Telegram is not connected.');
-				return;
-			}
-
-			alertsEnabled = !alertsEnabled;
-			updateStatusBar();
-		}
-	);
+	const refreshConnectionState = createTelegramConnectionStateRefresh({
+		resolveConnectionState: () => resolveTelegramConnectionState(secretStore, backendClient),
+		beginAuthoritativeRefresh: () => {
+			connectionStateRevision += 1;
+			return connectionStateRevision;
+		},
+		getConnectionStateRevision: () => connectionStateRevision,
+		applyConnectionState,
+	});
 
 	const connectFlow = createTelegramConnectCommand({
 		client: backendClient,
@@ -252,10 +344,39 @@ export function activate(context: vscode.ExtensionContext) {
 			...callbacks,
 		}),
 		applyConnectionState,
+		getConnectionStateRevision: () => connectionStateRevision,
+		enableAlertsAfterConnect: () => {
+			if (canEnableAlerts(connectionState)) {
+				alertsEnabled = true;
+				updateStatusBar();
+			}
+		},
 		showConnected: () => { void vscode.window.showInformationMessage('Telegram is connected.'); },
 		showError: (message) => { void vscode.window.showErrorMessage(message); },
 		now: () => Date.now(),
 	});
+
+	const toggleCommand = vscode.commands.registerCommand(
+		'far-away-from-codex.toggleAlerts',
+		createTelegramAlertsToggleCommand({
+			getConnectionState: () => connectionState,
+			getAlertsEnabled: () => alertsEnabled,
+			setAlertsEnabled: (enabled) => {
+				alertsEnabled = enabled;
+				updateStatusBar();
+			},
+			refreshConnectionState,
+			showDisconnectedPrompt: async () => {
+				const selection = await vscode.window.showInformationMessage(
+					'Telegram is not connected.',
+					'Connect Telegram',
+					'Cancel'
+				);
+				return selection === 'Connect Telegram' ? 'connect' : 'cancel';
+			},
+			connectTelegram: (intent) => connectFlow.execute(intent),
+		})
+	);
 
 	const connectTelegramCommand = vscode.commands.registerCommand(
 		'far-away-from-codex.connectTelegram',
