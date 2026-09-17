@@ -7,7 +7,7 @@ import {
   PAIRING_CREATION_RATE_LIMIT_RETRY_AFTER_SECONDS,
   PAIRING_STATUS_RATE_LIMIT_RETRY_AFTER_SECONDS,
 } from "../src/pairingRateLimit";
-import { PAIRING_TTL_MS, hashPairingToken } from "../src/pairings";
+import { PAIRING_TTL_MS, createPairing, hashPairingToken } from "../src/pairings";
 
 const INSTALLATION_CREDENTIAL = "abcdefghijklmnopqrstuvwxyz0123456789_ABCDEF";
 
@@ -22,6 +22,18 @@ class FakeRateLimiter implements RateLimit {
     const attempts = (this.attemptsByKey.get(key) ?? 0) + 1;
     this.attemptsByKey.set(key, attempts);
     return { success: attempts <= this.allowedAttempts };
+  }
+}
+
+class StateMutatingRateLimiter implements RateLimit {
+  readonly keys: string[] = [];
+
+  constructor(private readonly mutateState: () => Promise<void>) {}
+
+  async limit({ key }: RateLimitOptions): Promise<RateLimitOutcome> {
+    this.keys.push(key);
+    await this.mutateState();
+    return { success: true };
   }
 }
 
@@ -69,6 +81,28 @@ async function requestPairing(workerEnv = testEnv()): Promise<Response> {
 
 function tokenFrom(pairing: PairingResponse): string {
   return new URL(pairing.telegramUrl).searchParams.get("start")!;
+}
+
+function environmentWithPairingConnectionLookup(
+  connectionLookup: () => Promise<{ telegram_chat_id: string | null } | null>,
+  creationRateLimiter: RateLimit = new FakeRateLimiter(5),
+): Env {
+  let lookupCount = 0;
+  return {
+    ...testEnv(creationRateLimiter),
+    DB: {
+      prepare: () => ({
+        bind: () => ({
+          first: () => {
+            lookupCount += 1;
+            return lookupCount === 1
+              ? Promise.resolve({ id: "installation-id" })
+              : connectionLookup();
+          },
+        }),
+      }),
+    } as unknown as D1Database,
+  };
 }
 
 async function webhook(token: string, chatId = 123456789, type = "private"): Promise<Response> {
@@ -124,6 +158,174 @@ describe("Telegram pairing", () => {
       .bind(installation.id)
       .all<{ id: string }>();
     expect(active.results.map(({ id }) => id)).toEqual([second.pairingId]);
+  });
+
+  it("rejects an already-connected installation before pairing generation, mutation, or rate limiting", async () => {
+    const installation = await createInstallation();
+    const existing = await (await requestPairing()).json<PairingResponse>();
+    const chatId = "987654321";
+    await env.DB.prepare("UPDATE installations SET telegram_chat_id = ? WHERE id = ?")
+      .bind(chatId, installation.id)
+      .run();
+    const creationRateLimiter = new FakeRateLimiter(0);
+    const getRandomValues = vi.spyOn(crypto, "getRandomValues");
+    getRandomValues.mockClear();
+
+    const response = await requestPairing(testEnv(creationRateLimiter));
+    const body = await response.text();
+
+    expect(response.status).toBe(409);
+    expect(JSON.parse(body)).toEqual({
+      error: { code: "ALREADY_CONNECTED", message: "Telegram is already connected." },
+    });
+    expect(body).not.toContain(chatId);
+    expect(body).not.toContain("telegramUrl");
+    expect(body).not.toContain("pairingId");
+    expect(getRandomValues).not.toHaveBeenCalled();
+    expect(creationRateLimiter.keys).toEqual([]);
+    expect(
+      await env.DB.prepare("SELECT telegram_chat_id FROM installations WHERE id = ?")
+        .bind(installation.id)
+        .first<{ telegram_chat_id: string | null }>(),
+    ).toEqual({ telegram_chat_id: chatId });
+    const pendingPairings = await env.DB.prepare(
+      "SELECT id FROM pairings WHERE installation_id = ? AND used_at IS NULL",
+    )
+      .bind(installation.id)
+      .all<{ id: string }>();
+    expect(pendingPairings.results).toEqual([{ id: existing.pairingId }]);
+  });
+
+  it("returns pairing-unavailable without rate limiting when the connected-state lookup fails", async () => {
+    const creationRateLimiter = new FakeRateLimiter(5);
+    const response = await createPairing(
+      new Request("https://worker.example/v1/pairings", {
+        method: "POST",
+        headers: authenticatedHeaders(),
+      }),
+      environmentWithPairingConnectionLookup(async () => {
+        throw new Error("sensitive database detail");
+      }, creationRateLimiter),
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(JSON.parse(body)).toEqual({
+      error: { code: "PAIRING_UNAVAILABLE", message: "Pairing is temporarily unavailable." },
+    });
+    expect(body).not.toContain("sensitive database detail");
+    expect(creationRateLimiter.keys).toEqual([]);
+  });
+
+  it("returns a bounded pairing-unavailable response when the connected-state lookup hangs", async () => {
+    const creationRateLimiter = new FakeRateLimiter(5);
+    const response = await createPairing(
+      new Request("https://worker.example/v1/pairings", {
+        method: "POST",
+        headers: authenticatedHeaders(),
+      }),
+      environmentWithPairingConnectionLookup(
+        () => new Promise<never>(() => undefined),
+        creationRateLimiter,
+      ),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: { code: "PAIRING_UNAVAILABLE", message: "Pairing is temporarily unavailable." },
+    });
+    expect(creationRateLimiter.keys).toEqual([]);
+  });
+
+  it("fails closed if the installation is revoked after pairing authentication", async () => {
+    const response = await createPairing(
+      new Request("https://worker.example/v1/pairings", {
+        method: "POST",
+        headers: authenticatedHeaders(),
+      }),
+      environmentWithPairingConnectionLookup(async () => null),
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: { code: "UNAUTHORIZED", message: "Installation authentication failed." },
+    });
+  });
+
+  it("returns the existing safe unauthorized response for invalid and revoked pairing credentials", async () => {
+    const invalidCredential = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_abcdef";
+    const invalid = await worker.fetch(
+      new Request("https://worker.example/v1/pairings", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${invalidCredential}` },
+      }),
+      testEnv(),
+    );
+    const installation = await createInstallation();
+    await env.DB.prepare("UPDATE installations SET revoked_at = ? WHERE id = ?")
+      .bind(Date.now(), installation.id)
+      .run();
+    const revoked = await requestPairing();
+
+    for (const response of [invalid, revoked]) {
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({
+        error: { code: "UNAUTHORIZED", message: "Installation authentication failed." },
+      });
+    }
+  });
+
+  it("atomically rejects a connection race without deleting the pending pairing", async () => {
+    const installation = await createInstallation();
+    const existing = await (await requestPairing()).json<PairingResponse>();
+    const chatId = "987654321";
+    const creationRateLimiter = new StateMutatingRateLimiter(async () => {
+      await env.DB.prepare("UPDATE installations SET telegram_chat_id = ? WHERE id = ?")
+        .bind(chatId, installation.id)
+        .run();
+    });
+
+    const response = await requestPairing(testEnv(creationRateLimiter));
+    const body = await response.text();
+
+    expect(response.status).toBe(409);
+    expect(JSON.parse(body)).toEqual({
+      error: { code: "ALREADY_CONNECTED", message: "Telegram is already connected." },
+    });
+    expect(body).not.toContain(chatId);
+    expect(body).not.toContain("telegramUrl");
+    expect(body).not.toContain("pairingId");
+    expect(creationRateLimiter.keys).toEqual([installation.id]);
+    const pendingPairings = await env.DB.prepare(
+      "SELECT id FROM pairings WHERE installation_id = ? AND used_at IS NULL",
+    )
+      .bind(installation.id)
+      .all<{ id: string }>();
+    expect(pendingPairings.results).toEqual([{ id: existing.pairingId }]);
+  });
+
+  it("atomically rejects a revocation race without deleting the pending pairing", async () => {
+    const installation = await createInstallation();
+    const existing = await (await requestPairing()).json<PairingResponse>();
+    const creationRateLimiter = new StateMutatingRateLimiter(async () => {
+      await env.DB.prepare("UPDATE installations SET revoked_at = ? WHERE id = ?")
+        .bind(Date.now(), installation.id)
+        .run();
+    });
+
+    const response = await requestPairing(testEnv(creationRateLimiter));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: { code: "UNAUTHORIZED", message: "Installation authentication failed." },
+    });
+    expect(creationRateLimiter.keys).toEqual([installation.id]);
+    const pendingPairings = await env.DB.prepare(
+      "SELECT id FROM pairings WHERE installation_id = ? AND used_at IS NULL",
+    )
+      .bind(installation.id)
+      .all<{ id: string }>();
+    expect(pendingPairings.results).toEqual([{ id: existing.pairingId }]);
   });
 
   it("limits creation per installation", async () => {
