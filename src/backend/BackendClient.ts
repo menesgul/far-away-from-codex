@@ -2,6 +2,9 @@ export class BackendClientError extends Error {}
 
 export class InstallationCredentialRejectedError extends BackendClientError {}
 
+/** The Worker confirmed that this installation was paired during a stale/racing request. */
+export class TelegramAlreadyConnectedError extends BackendClientError {}
+
 export interface InstallationCredentialStore {
 	getInstallationCredential(): Promise<string | undefined>;
 	saveInstallationCredential(credential: string): Promise<void>;
@@ -24,6 +27,12 @@ interface PairingStatusResponse {
 
 interface TelegramConnectionResponse {
 	connected?: unknown;
+}
+
+interface BackendErrorResponse {
+	error?: {
+		code?: unknown;
+	};
 }
 
 export interface Pairing {
@@ -103,6 +112,13 @@ export class BackendClient {
 				headers: { Authorization: `Bearer ${credential}` },
 			},
 			async (response) => {
+				if (response.status === 409) {
+					const result = await this.readBoundedJson(response);
+					if (this.isAlreadyConnectedResponse(result)) {
+						throw new TelegramAlreadyConnectedError('Telegram is already connected.');
+					}
+					throw this.errorForStatus(response.status);
+				}
 				if (response.status !== 201) {
 					throw this.errorForStatus(response.status);
 				}
@@ -393,6 +409,14 @@ export class BackendClient {
 			&& Object.keys(value).length === 1
 			&& Object.prototype.hasOwnProperty.call(value, 'connected')
 			&& typeof (value as TelegramConnectionResponse).connected === 'boolean';
+	}
+
+	private isAlreadyConnectedResponse(value: unknown): value is BackendErrorResponse {
+		return typeof value === 'object'
+			&& value !== null
+			&& typeof (value as BackendErrorResponse).error === 'object'
+			&& (value as BackendErrorResponse).error !== null
+			&& (value as BackendErrorResponse).error?.code === 'ALREADY_CONNECTED';
 	}
 
 	private parseBaseUrl(value: string): URL {
