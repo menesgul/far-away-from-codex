@@ -1,5 +1,7 @@
 export class BackendClientError extends Error {}
 
+export class InstallationCredentialRejectedError extends BackendClientError {}
+
 export interface InstallationCredentialStore {
 	getInstallationCredential(): Promise<string | undefined>;
 	saveInstallationCredential(credential: string): Promise<void>;
@@ -18,6 +20,10 @@ interface PairingResponse {
 
 interface PairingStatusResponse {
 	status?: unknown;
+}
+
+interface TelegramConnectionResponse {
+	connected?: unknown;
 }
 
 export interface Pairing {
@@ -108,6 +114,32 @@ export class BackendClient {
 				}
 
 				return pairing;
+			}
+		);
+	}
+
+	public async getTelegramConnection(credential: string): Promise<boolean> {
+		if (!this.isValidCredential(credential)) {
+			throw new InstallationCredentialRejectedError('The anonymous installation credential was rejected.');
+		}
+
+		return this.executeRequest(
+			'/v1/telegram-connection',
+			{
+				method: 'GET',
+				headers: { Authorization: `Bearer ${credential}` },
+			},
+			async (response) => {
+				if (response.status !== 200) {
+					throw this.errorForStatus(response.status);
+				}
+
+				const result = await this.readBoundedJson(response);
+				if (!this.isTelegramConnectionResponse(result)) {
+					throw new BackendClientError('The backend returned an invalid Telegram connection response.');
+				}
+
+				return result.connected;
 			}
 		);
 	}
@@ -266,7 +298,7 @@ export class BackendClient {
 
 	private errorForStatus(status: number): BackendClientError {
 		if (status === 401) {
-			return new BackendClientError('The anonymous installation credential was rejected.');
+			return new InstallationCredentialRejectedError('The anonymous installation credential was rejected.');
 		}
 
 		if (status === 429) {
@@ -351,6 +383,16 @@ export class BackendClient {
 			&& ((value as PairingStatusResponse).status === 'pending'
 				|| (value as PairingStatusResponse).status === 'connected'
 				|| (value as PairingStatusResponse).status === 'expired');
+	}
+
+	private isTelegramConnectionResponse(value: unknown): value is TelegramConnectionResponse & {
+		connected: boolean;
+	} {
+		return typeof value === 'object'
+			&& value !== null
+			&& Object.keys(value).length === 1
+			&& Object.prototype.hasOwnProperty.call(value, 'connected')
+			&& typeof (value as TelegramConnectionResponse).connected === 'boolean';
 	}
 
 	private parseBaseUrl(value: string): URL {
