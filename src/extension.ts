@@ -1,14 +1,18 @@
 import * as vscode from 'vscode';
 import { BackendClient, BackendClientError, type Pairing } from './backend/BackendClient';
 import { SecretStore } from './state/SecretStore';
+import {
+	canEnableAlerts,
+	resolveTelegramConnectionState,
+	statusBarText,
+	type TelegramConnectionState,
+} from './state/TelegramConnectionState';
 
 // This is application-owned, not read from workspace configuration. Replace it when the
 // production Worker URL is provisioned; tests inject their own URL via BackendClient.
 const PRODUCTION_BACKEND_URL = 'https://far-away-from-codex-worker.menesgul.workers.dev';
 const PAIRING_POLL_INTERVAL_MS = 3_000;
 const MAX_PAIRING_POLL_DURATION_MS = 5 * 60 * 1_000;
-
-let alertsEnabled = false;
 
 export function activate(context: vscode.ExtensionContext) {
 	const statusBarItem = vscode.window.createStatusBarItem(
@@ -18,19 +22,61 @@ export function activate(context: vscode.ExtensionContext) {
 	const secretStore = new SecretStore(context.secrets);
 	const backendClient = new BackendClient(PRODUCTION_BACKEND_URL);
 	let pairingInProgress = false;
+	let alertsEnabled = false;
+	let connectionState: TelegramConnectionState = 'unknown';
+	let connectionStateRevision = 0;
+	let connectionRefreshInFlight: Promise<void> | undefined;
 
 	statusBarItem.command = 'far-away-from-codex.toggleAlerts';
 	statusBarItem.tooltip = 'Click to enable or disable Codex phone alerts';
 
 	const updateStatusBar = () => {
-		statusBarItem.text = alertsEnabled
-			? '$(bell) Codex Alerts: ON'
-			: '$(bell) Codex Alerts: OFF';
+		statusBarItem.text = statusBarText(connectionState, alertsEnabled);
+	};
+
+	const applyConnectionState = (nextState: TelegramConnectionState) => {
+		connectionStateRevision += 1;
+		connectionState = nextState;
+		if (!canEnableAlerts(connectionState)) {
+			alertsEnabled = false;
+		}
+		updateStatusBar();
+	};
+
+	const refreshConnectionState = (): Promise<void> => {
+		if (connectionRefreshInFlight !== undefined) {
+			return connectionRefreshInFlight;
+		}
+
+		const refreshRevision = connectionStateRevision;
+		const refresh = resolveTelegramConnectionState(secretStore, backendClient)
+			.then((nextState) => {
+				if (connectionStateRevision === refreshRevision) {
+					applyConnectionState(nextState);
+				}
+			});
+		connectionRefreshInFlight = refresh;
+		void refresh.finally(() => {
+			if (connectionRefreshInFlight === refresh) {
+				connectionRefreshInFlight = undefined;
+			}
+		});
+		return refresh;
 	};
 
 	const toggleCommand = vscode.commands.registerCommand(
 		'far-away-from-codex.toggleAlerts',
 		() => {
+			if (connectionState === 'unknown') {
+				void refreshConnectionState();
+				return;
+			}
+
+			if (!canEnableAlerts(connectionState)) {
+				void vscode.window.showInformationMessage('Telegram is not connected.');
+				return;
+			}
+
 			alertsEnabled = !alertsEnabled;
 			updateStatusBar();
 		}
@@ -59,6 +105,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 				const outcome = await pollForPairing(backendClient, credential, pairing);
 				if (outcome === 'connected') {
+					applyConnectionState('connected');
 					void vscode.window.showInformationMessage('Telegram is connected.');
 				} else if (outcome === 'expired') {
 					void vscode.window.showErrorMessage('Telegram pairing expired. Please try again.');
@@ -83,6 +130,7 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 
 				await backendClient.disconnectTelegram(credential);
+				applyConnectionState('disconnected');
 				void vscode.window.showInformationMessage('Telegram is disconnected.');
 			} catch (error) {
 				void vscode.window.showErrorMessage(safeErrorMessage(error, 'Could not disconnect Telegram.'));
@@ -99,6 +147,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	updateStatusBar();
 	statusBarItem.show();
+	void refreshConnectionState();
 
 	context.subscriptions.push(
 		statusBarItem,
