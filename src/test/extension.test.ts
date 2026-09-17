@@ -2,13 +2,20 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { createTelegramPairingAndStartPolling } from '../extension';
 import {
 	BackendClient,
 	BackendClientError,
 	InstallationCredentialRejectedError,
+	TelegramAlreadyConnectedError,
 	type InstallationCredentialStore,
+	type Pairing,
+	type PairingStatus,
 } from '../backend/BackendClient';
+import {
+	createTelegramConnectCommand,
+	type TelegramConnectSession,
+	type TelegramConnectSessionCallbacks,
+} from '../extension';
 import { SecretStore } from '../state/SecretStore';
 import {
 	canEnableAlerts,
@@ -18,8 +25,17 @@ import {
 } from '../state/TelegramConnectionState';
 import {
 	generateTelegramPairingQrDataUri,
+	isPairingPanelMessage,
+	renderTelegramPairingExpiredHtml,
 	renderTelegramPairingHtml,
+	type PairingPanelMessage,
+	type TelegramPairingPanel,
 } from '../ui/TelegramPairingPanel';
+import {
+	TelegramPairingSession,
+	type PairingSessionState,
+	type PairingSessionTimers,
+} from '../telegram/TelegramPairingSession';
 
 const INSTALLATION_CREDENTIAL = 'abcdefghijklmnopqrstuvwxyz0123456789_ABCDEF';
 const FRESH_INSTALLATION_CREDENTIAL = 'freshinstallationcredential0123456789_ABCDEF';
@@ -80,6 +96,217 @@ function readTypeScriptFiles(directory: string): string[] {
 
 		return entry.name.endsWith('.ts') ? [entryPath] : [];
 	});
+}
+
+class Deferred<T> {
+	public readonly promise: Promise<T>;
+	public resolve!: (value: T | PromiseLike<T>) => void;
+	public reject!: (reason?: unknown) => void;
+
+	public constructor() {
+		this.promise = new Promise<T>((resolve, reject) => {
+			this.resolve = resolve;
+			this.reject = reject;
+		});
+	}
+}
+
+class FakeTimers implements PairingSessionTimers {
+	private currentTime = 0;
+	private nextId = 1;
+	private readonly scheduled = new Map<number, { at: number; callback: () => void }>();
+
+	public now(): number {
+		return this.currentTime;
+	}
+
+	public setTimeout(callback: () => void, delayMs: number): ReturnType<typeof setTimeout> {
+		const id = this.nextId++;
+		this.scheduled.set(id, { at: this.currentTime + delayMs, callback });
+		return id as unknown as ReturnType<typeof setTimeout>;
+	}
+
+	public clearTimeout(timer: ReturnType<typeof setTimeout>): void {
+		this.scheduled.delete(timer as unknown as number);
+	}
+
+	public advanceBy(delayMs: number): void {
+		const target = this.currentTime + delayMs;
+		while (true) {
+			const due = [...this.scheduled.entries()]
+				.filter(([, timer]) => timer.at <= target)
+				.sort(([leftId, left], [rightId, right]) => left.at - right.at || leftId - rightId)[0];
+			if (due === undefined) {
+				break;
+			}
+			const [id, timer] = due;
+			this.scheduled.delete(id);
+			this.currentTime = timer.at;
+			timer.callback();
+		}
+		this.currentTime = target;
+	}
+}
+
+class FakePairingPanel {
+	public isDisposed = false;
+	public showExpiredCalls = 0;
+	public revealCalls = 0;
+	public disposeCalls = 0;
+	private readonly actionListeners = new Set<(message: PairingPanelMessage) => void>();
+	private readonly disposeListeners = new Set<() => void>();
+
+	public readonly onDidReceiveAction = (listener: (message: PairingPanelMessage) => void) => {
+		this.actionListeners.add(listener);
+		return { dispose: () => this.actionListeners.delete(listener) };
+	};
+
+	public readonly onDidDispose = (listener: () => void) => {
+		this.disposeListeners.add(listener);
+		return { dispose: () => this.disposeListeners.delete(listener) };
+	};
+
+	public showExpired(): void {
+		this.showExpiredCalls += 1;
+	}
+
+	public reveal(): boolean {
+		if (this.isDisposed) {
+			return false;
+		}
+		this.revealCalls += 1;
+		return true;
+	}
+
+	public dispose(): void {
+		this.disposeCalls += 1;
+		if (this.isDisposed) {
+			return;
+		}
+		this.isDisposed = true;
+		for (const listener of [...this.disposeListeners]) {
+			listener();
+		}
+	}
+
+	public emitAction(message: PairingPanelMessage): void {
+		for (const listener of [...this.actionListeners]) {
+			listener(message);
+		}
+	}
+}
+
+function futurePairing(expiresAt: number): { pairingId: string; telegramUrl: string; expiresAt: Date } {
+	return {
+		pairingId: PAIRING_ID,
+		telegramUrl: 'https://t.me/far_away_bot?start=opaque-token',
+		expiresAt: new Date(expiresAt),
+	};
+}
+
+async function settlePromises(): Promise<void> {
+	for (let index = 0; index < 8; index += 1) {
+		await Promise.resolve();
+	}
+}
+
+class FakeConnectSession implements TelegramConnectSession {
+	public state: PairingSessionState = 'starting';
+	public revealCalls = 0;
+	public disposeCalls = 0;
+	public cancelCalls = 0;
+	public completeConnectedCalls = 0;
+	public startCalls = 0;
+
+	public constructor(private readonly callbacks: TelegramConnectSessionCallbacks) {}
+
+	public reveal(): boolean {
+		this.revealCalls += 1;
+		return this.state === 'waiting';
+	}
+
+	public dispose(): void {
+		this.disposeCalls += 1;
+		this.callbacks.onDisposed(this);
+	}
+
+	public cancel(): void {
+		this.cancelCalls += 1;
+		this.emitTerminal('cancelled');
+	}
+
+	public completeConnected(): void {
+		this.completeConnectedCalls += 1;
+		this.emitConnected();
+		this.emitTerminal('connected');
+	}
+
+	public async start(_credential: string, _pairing: Pairing): Promise<void> {
+		this.startCalls += 1;
+		this.state = 'waiting';
+	}
+
+	public emitConnected(): void {
+		this.callbacks.onConnected(this);
+	}
+
+	public emitTerminal(state: Exclude<PairingSessionState, 'starting' | 'waiting'>): void {
+		this.state = state;
+		this.callbacks.onTerminal(this, state);
+	}
+
+	public emitDisposed(): void {
+		this.callbacks.onDisposed(this);
+	}
+}
+
+function createConnectCommandHarness(options: {
+	ensureInstallation?: () => Promise<string>;
+	getTelegramConnection?: () => Promise<boolean>;
+	createPairing?: () => Promise<Pairing>;
+} = {}) {
+	const sessions: FakeConnectSession[] = [];
+	const appliedStates: string[] = [];
+	const messages: string[] = [];
+	let ensureCalls = 0;
+	let connectionCalls = 0;
+	let pairingCalls = 0;
+	const command = createTelegramConnectCommand({
+		client: {
+			ensureInstallation: async () => {
+				ensureCalls += 1;
+				return options.ensureInstallation?.() ?? INSTALLATION_CREDENTIAL;
+			},
+			getTelegramConnection: async () => {
+				connectionCalls += 1;
+				return options.getTelegramConnection?.() ?? false;
+			},
+			createPairing: async () => {
+				pairingCalls += 1;
+				return options.createPairing?.() ?? futurePairing(Date.now() + 60_000);
+			},
+		},
+		store: new FakeCredentialStore(),
+		createSession: (callbacks) => {
+			const session = new FakeConnectSession(callbacks);
+			sessions.push(session);
+			return session;
+		},
+		applyConnectionState: (state) => appliedStates.push(state),
+		showConnected: () => messages.push('connected'),
+		showError: (message) => messages.push(message),
+		now: () => Date.now(),
+	});
+
+	return {
+		command,
+		sessions,
+		appliedStates,
+		messages,
+		get ensureCalls() { return ensureCalls; },
+		get connectionCalls() { return connectionCalls; },
+		get pairingCalls() { return pairingCalls; },
+	};
 }
 
 suite('Extension Test Suite', () => {
@@ -250,6 +477,19 @@ suite('Extension Test Suite', () => {
 		await assert.rejects(
 			client.createPairing(INSTALLATION_CREDENTIAL),
 			(error: unknown) => error instanceof BackendClientError && /invalid pairing response/.test(error.message)
+		);
+	});
+
+	test('createPairing classifies the documented already-connected response', async () => {
+		const client = new BackendClient(
+			'https://backend.example',
+			1_000,
+			async () => new Response(JSON.stringify({ error: { code: 'ALREADY_CONNECTED' } }), { status: 409 })
+		);
+
+		await assert.rejects(
+			client.createPairing(INSTALLATION_CREDENTIAL),
+			TelegramAlreadyConnectedError
 		);
 	});
 
@@ -523,52 +763,354 @@ suite('Extension Test Suite', () => {
 		assert.ok(html.includes("default-src 'none'"));
 		assert.ok(html.includes('img-src data:'));
 		assert.ok(html.includes("style-src 'nonce-test-nonce'"));
+		assert.ok(html.includes("script-src 'nonce-test-nonce'"));
+		assert.ok(html.includes("base-uri 'none'"));
+		assert.ok(html.includes("form-action 'none'"));
+		assert.ok(html.includes('nonce="test-nonce"'));
+		assert.ok(html.includes('acquireVsCodeApi()'));
 		assert.strictEqual(html.includes('http://'), false);
 		assert.strictEqual(html.includes('https://'), false);
 		assert.strictEqual(html.includes(telegramUrl), false);
 		assert.strictEqual(html.includes('opaque-token'), false);
+		assert.strictEqual(html.includes('fetch('), false);
+		assert.strictEqual(html.includes('XMLHttpRequest'), false);
+		assert.strictEqual(html.includes('WebSocket'), false);
+		assert.strictEqual(html.includes('localStorage'), false);
+		assert.strictEqual(html.includes('sessionStorage'), false);
 	});
 
-	test('Connect creates a pairing, opens the local panel, and retains bounded polling without opening Telegram', async () => {
-		const store = new FakeCredentialStore();
-		const calls: string[] = [];
-		const client = {
-			ensureInstallation: async (currentStore: InstallationCredentialStore) => {
-				calls.push('ensureInstallation');
-				assert.strictEqual(currentStore, store);
-				return INSTALLATION_CREDENTIAL;
-			},
-			createPairing: async (credential: string) => {
-				calls.push('createPairing');
-				assert.strictEqual(credential, INSTALLATION_CREDENTIAL);
-				return {
-					pairingId: PAIRING_ID,
-					telegramUrl: 'https://t.me/far_away_bot?start=opaque-token',
-					expiresAt: new Date('2030-01-02T03:04:05.000Z'),
-				};
-			},
-		};
+	test('pairing panel accepts only exact action-only messages and expired markup has Close only', () => {
+		for (const message of [
+			{ type: 'copy-link' },
+			{ type: 'open-on-this-device' },
+			{ type: 'cancel' },
+			{ type: 'close' },
+		]) {
+			assert.strictEqual(isPairingPanelMessage(message), true);
+		}
+		for (const message of [
+			null,
+			{},
+			{ type: 'copy-link', telegramUrl: 'https://t.me/token' },
+			{ type: 'unknown' },
+			{ type: 7 },
+			['copy-link'],
+		]) {
+			assert.strictEqual(isPairingPanelMessage(message), false);
+		}
 
-		const outcome = await createTelegramPairingAndStartPolling(
-			client,
-			store,
-			async (telegramUrl) => {
-				calls.push('showPanel');
-				assert.strictEqual(telegramUrl, 'https://t.me/far_away_bot?start=opaque-token');
+		const expiredHtml = renderTelegramPairingExpiredHtml('expired-nonce');
+		assert.ok(expiredHtml.includes('Pairing expired'));
+		assert.ok(expiredHtml.includes('This QR code is no longer valid.'));
+		assert.ok(expiredHtml.includes('Run Connect Telegram again to create a new pairing.'));
+		assert.ok(expiredHtml.includes('data-action="close"'));
+		assert.strictEqual(expiredHtml.includes('data-action="copy-link"'), false);
+		assert.strictEqual(expiredHtml.includes('data-action="open-on-this-device"'), false);
+		assert.strictEqual(expiredHtml.includes('data-action="cancel"'), false);
+		assert.strictEqual(expiredHtml.includes('opaque-token'), false);
+	});
+
+	test('cancelling during asynchronous panel construction leaves the starting session terminal and disposes the late panel', async () => {
+		const timers = new FakeTimers();
+		const latePanel = new FakePairingPanel();
+		const panelCreation = new Deferred<TelegramPairingPanel>();
+		let terminalCalls = 0;
+		const session = new TelegramPairingSession({
+			client: { getPairingStatus: async () => 'pending' },
+			createPanel: async () => panelCreation.promise,
+			writeClipboard: async () => undefined,
+			openExternal: async () => undefined,
+			onConnected: () => undefined,
+			onTerminal: () => { terminalCalls += 1; },
+			timers,
+			maxPollDurationMs: 100,
+		});
+
+		const start = session.start(INSTALLATION_CREDENTIAL, futurePairing(100));
+		assert.strictEqual(session.state, 'starting');
+		session.cancel();
+		panelCreation.resolve(latePanel as unknown as TelegramPairingPanel);
+		await start;
+		assert.strictEqual(session.state, 'cancelled');
+		assert.strictEqual(terminalCalls, 1);
+		assert.strictEqual(latePanel.isDisposed, true);
+	});
+
+	test('pairing session serializes polling and does not overlap status GETs', async () => {
+		const timers = new FakeTimers();
+		const panel = new FakePairingPanel();
+		const firstPoll = new Deferred<PairingStatus>();
+		let requests = 0;
+		const session = new TelegramPairingSession({
+			client: {
+				getPairingStatus: async () => {
+					requests += 1;
+					return firstPoll.promise;
+				},
 			},
-			async (credential, pairing) => {
-				calls.push('poll');
-				assert.strictEqual(credential, INSTALLATION_CREDENTIAL);
-				assert.strictEqual(pairing.pairingId, PAIRING_ID);
-				return 'connected';
+			createPanel: async () => panel as unknown as TelegramPairingPanel,
+			writeClipboard: async () => undefined,
+			openExternal: async () => undefined,
+			onConnected: () => undefined,
+			timers,
+			pollIntervalMs: 3,
+			maxPollDurationMs: 100,
+		});
+
+		await session.start(INSTALLATION_CREDENTIAL, futurePairing(100));
+		assert.strictEqual(requests, 1);
+		timers.advanceBy(50);
+		assert.strictEqual(requests, 1);
+		firstPoll.resolve('pending');
+		await settlePromises();
+		timers.advanceBy(3);
+		assert.strictEqual(requests, 2);
+		session.cancel();
+	});
+
+	test('pairing session handles duplicate Cancel and Cancel plus panel X exactly once', async () => {
+		const timers = new FakeTimers();
+		const panel = new FakePairingPanel();
+		let terminalCalls = 0;
+		const session = new TelegramPairingSession({
+			client: { getPairingStatus: async () => new Promise<PairingStatus>(() => undefined) },
+			createPanel: async () => panel as unknown as TelegramPairingPanel,
+			writeClipboard: async () => undefined,
+			openExternal: async () => undefined,
+			onConnected: () => undefined,
+			onTerminal: () => { terminalCalls += 1; },
+			timers,
+			maxPollDurationMs: 100,
+		});
+
+		await session.start(INSTALLATION_CREDENTIAL, futurePairing(100));
+		panel.emitAction({ type: 'cancel' });
+		panel.emitAction({ type: 'cancel' });
+		panel.dispose();
+		assert.strictEqual(session.state, 'cancelled');
+		assert.strictEqual(terminalCalls, 1);
+		assert.strictEqual(panel.disposeCalls, 2);
+	});
+
+	test('panel X cancels locally and stops future polling', async () => {
+		const timers = new FakeTimers();
+		const panel = new FakePairingPanel();
+		let requests = 0;
+		const session = new TelegramPairingSession({
+			client: { getPairingStatus: async () => { requests += 1; return 'pending'; } },
+			createPanel: async () => panel as unknown as TelegramPairingPanel,
+			writeClipboard: async () => undefined,
+			openExternal: async () => undefined,
+			onConnected: () => undefined,
+			timers,
+			pollIntervalMs: 3,
+			maxPollDurationMs: 100,
+		});
+
+		await session.start(INSTALLATION_CREDENTIAL, futurePairing(100));
+		await settlePromises();
+		panel.dispose();
+		timers.advanceBy(99);
+		await settlePromises();
+		assert.strictEqual(session.state, 'cancelled');
+		assert.strictEqual(requests, 1);
+	});
+
+	test('a connected in-flight status response is observed after local Cancel without reviving the panel', async () => {
+		const timers = new FakeTimers();
+		const panel = new FakePairingPanel();
+		const poll = new Deferred<PairingStatus>();
+		let connectedCalls = 0;
+		const session = new TelegramPairingSession({
+			client: { getPairingStatus: async () => poll.promise },
+			createPanel: async () => panel as unknown as TelegramPairingPanel,
+			writeClipboard: async () => undefined,
+			openExternal: async () => undefined,
+			onConnected: () => { connectedCalls += 1; },
+			timers,
+			maxPollDurationMs: 100,
+		});
+
+		await session.start(INSTALLATION_CREDENTIAL, futurePairing(100));
+		panel.emitAction({ type: 'cancel' });
+		poll.resolve('connected');
+		await settlePromises();
+		assert.strictEqual(session.state, 'cancelled');
+		assert.strictEqual(connectedCalls, 1);
+		assert.strictEqual(panel.disposeCalls, 1);
+	});
+
+	test('a pre-deadline connected GET beats the local expiry boundary', async () => {
+		const timers = new FakeTimers();
+		const panel = new FakePairingPanel();
+		const poll = new Deferred<PairingStatus>();
+		let connectedCalls = 0;
+		const session = new TelegramPairingSession({
+			client: { getPairingStatus: async () => poll.promise },
+			createPanel: async () => panel as unknown as TelegramPairingPanel,
+			writeClipboard: async () => undefined,
+			openExternal: async () => undefined,
+			onConnected: () => { connectedCalls += 1; },
+			timers,
+			maxPollDurationMs: 10,
+		});
+
+		await session.start(INSTALLATION_CREDENTIAL, futurePairing(10));
+		timers.advanceBy(10);
+		assert.strictEqual(session.state, 'waiting');
+		poll.resolve('connected');
+		await settlePromises();
+		assert.strictEqual(session.state, 'connected');
+		assert.strictEqual(connectedCalls, 1);
+		assert.strictEqual(panel.disposeCalls, 1);
+	});
+
+	test('expiry waits for an in-flight pending or failed GET then keeps the expired panel open', async () => {
+		for (const outcome of ['pending', 'failure'] as const) {
+			const timers = new FakeTimers();
+			const panel = new FakePairingPanel();
+			const poll = new Deferred<PairingStatus>();
+			const session = new TelegramPairingSession({
+				client: { getPairingStatus: async () => poll.promise },
+				createPanel: async () => panel as unknown as TelegramPairingPanel,
+				writeClipboard: async () => undefined,
+				openExternal: async () => undefined,
+				onConnected: () => undefined,
+				timers,
+				maxPollDurationMs: 10,
+			});
+
+			await session.start(INSTALLATION_CREDENTIAL, futurePairing(10));
+			timers.advanceBy(10);
+			if (outcome === 'pending') {
+				poll.resolve('pending');
+			} else {
+				poll.reject(new Error('temporary backend failure'));
 			}
-		);
-
-		assert.strictEqual(outcome, 'connected');
-		assert.deepStrictEqual(calls, ['ensureInstallation', 'createPairing', 'showPanel', 'poll']);
+			await settlePromises();
+			assert.strictEqual(session.state, 'expired');
+			assert.strictEqual(panel.showExpiredCalls, 1);
+			assert.strictEqual(panel.isDisposed, false);
+		}
 	});
 
-	test('extension contributes Telegram connection commands and uses bounded polling', () => {
+	test('Copy and Open are explicit-only and ignored after expiry or cancellation', async () => {
+		const timers = new FakeTimers();
+		const panel = new FakePairingPanel();
+		const poll = new Deferred<PairingStatus>();
+		let copied = 0;
+		let opened = 0;
+		const session = new TelegramPairingSession({
+			client: { getPairingStatus: async () => poll.promise },
+			createPanel: async () => panel as unknown as TelegramPairingPanel,
+			writeClipboard: async () => { copied += 1; },
+			openExternal: async () => { opened += 1; },
+			onConnected: () => undefined,
+			timers,
+			maxPollDurationMs: 10,
+		});
+
+		await session.start(INSTALLATION_CREDENTIAL, futurePairing(10));
+		assert.strictEqual(copied, 0);
+		assert.strictEqual(opened, 0);
+		panel.emitAction({ type: 'copy-link' });
+		panel.emitAction({ type: 'open-on-this-device' });
+		await settlePromises();
+		assert.strictEqual(copied, 1);
+		assert.strictEqual(opened, 1);
+		timers.advanceBy(10);
+		poll.resolve('pending');
+		await settlePromises();
+		panel.emitAction({ type: 'copy-link' });
+		panel.emitAction({ type: 'open-on-this-device' });
+		await settlePromises();
+		assert.strictEqual(session.state, 'expired');
+		assert.strictEqual(copied, 1);
+		assert.strictEqual(opened, 1);
+		panel.emitAction({ type: 'close' });
+		assert.strictEqual(panel.isDisposed, true);
+	});
+
+	test('Connect command keeps one starting session while installation startup is in flight', async () => {
+		const installation = new Deferred<string>();
+		const harness = createConnectCommandHarness({
+			ensureInstallation: () => installation.promise,
+		});
+
+		const firstConnect = harness.command.execute();
+		assert.strictEqual(harness.sessions.length, 1);
+		assert.strictEqual(harness.command.getActiveSession(), harness.sessions[0]);
+		assert.strictEqual(harness.ensureCalls, 1);
+		assert.strictEqual(harness.sessions[0].state, 'starting');
+
+		await harness.command.execute();
+		assert.strictEqual(harness.sessions.length, 1);
+		assert.strictEqual(harness.ensureCalls, 1);
+		assert.strictEqual(harness.connectionCalls, 0);
+		assert.strictEqual(harness.pairingCalls, 0);
+		assert.strictEqual(harness.sessions[0].revealCalls, 1);
+
+		installation.resolve(INSTALLATION_CREDENTIAL);
+		await firstConnect;
+		assert.strictEqual(harness.sessions.length, 1);
+		assert.strictEqual(harness.pairingCalls, 1);
+		harness.command.dispose();
+	});
+
+	test('Connect command reveals a waiting session without creating another pairing', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute();
+		const firstSession = harness.sessions[0];
+		assert.strictEqual(firstSession.state, 'waiting');
+		assert.strictEqual(harness.pairingCalls, 1);
+
+		await harness.command.execute();
+		assert.strictEqual(harness.sessions.length, 1);
+		assert.strictEqual(harness.command.getActiveSession(), firstSession);
+		assert.strictEqual(firstSession.revealCalls, 1);
+		assert.strictEqual(harness.ensureCalls, 1);
+		assert.strictEqual(harness.pairingCalls, 1);
+		harness.command.dispose();
+	});
+
+	test('stale connected observations cannot overwrite a newer Connect generation', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute();
+		const firstSession = harness.sessions[0];
+		firstSession.emitTerminal('cancelled');
+
+		await harness.command.execute();
+		const secondSession = harness.sessions[1];
+		assert.strictEqual(harness.command.getActiveSession(), secondSession);
+		const statesBeforeStaleObservation = [...harness.appliedStates];
+		const messagesBeforeStaleObservation = [...harness.messages];
+
+		firstSession.emitConnected();
+		assert.deepStrictEqual(harness.appliedStates, statesBeforeStaleObservation);
+		assert.deepStrictEqual(harness.messages, messagesBeforeStaleObservation);
+		assert.strictEqual(harness.command.getActiveSession(), secondSession);
+		harness.command.dispose();
+	});
+
+	test('old terminal and disposal callbacks cannot clear or dispose a newer active session', async () => {
+		const harness = createConnectCommandHarness();
+		await harness.command.execute();
+		const firstSession = harness.sessions[0];
+		firstSession.emitTerminal('cancelled');
+
+		await harness.command.execute();
+		const secondSession = harness.sessions[1];
+		assert.strictEqual(harness.command.getActiveSession(), secondSession);
+
+		firstSession.emitTerminal('cancelled');
+		firstSession.emitDisposed();
+		assert.strictEqual(harness.command.getActiveSession(), secondSession);
+		assert.strictEqual(secondSession.disposeCalls, 0);
+		assert.strictEqual(secondSession.revealCalls, 0);
+		harness.command.dispose();
+	});
+
+	test('extension contributes Telegram connection commands and delegates pairing lifecycle to one session', () => {
 		const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8')) as {
 			contributes?: {
 				commands?: Array<{ command?: string }>;
@@ -580,11 +1122,21 @@ suite('Extension Test Suite', () => {
 
 		assert.ok(commands.includes('far-away-from-codex.connectTelegram'));
 		assert.ok(commands.includes('far-away-from-codex.disconnectTelegram'));
-		assert.ok(extensionSource.includes('PAIRING_POLL_INTERVAL_MS = 3_000'));
-		assert.ok(extensionSource.includes('MAX_PAIRING_POLL_DURATION_MS'));
-		assert.strictEqual(extensionSource.includes('openExternal'), false);
-		assert.ok(extensionSource.includes('createTelegramPairingAndStartPolling('));
-		assert.ok(extensionSource.includes('pollForPairing(backendClient, credential, pairing)'));
+		const sessionSource = fs.readFileSync(path.resolve(__dirname, '../../src/telegram/TelegramPairingSession.ts'), 'utf8');
+		assert.ok(extensionSource.includes('createTelegramConnectCommand'));
+		assert.ok(extensionSource.includes('let activePairingSession: TelegramConnectSession | undefined'));
+		assert.strictEqual(extensionSource.includes('pairingInProgress'), false);
+		assert.strictEqual(extensionSource.includes('withProgress'), false);
+		assert.ok(extensionSource.includes('getTelegramConnection(credential)'));
+		assert.ok(extensionSource.includes('createPairing(credential)'));
+		assert.ok(extensionSource.includes("if (existingSession.state === 'expired')"));
+		assert.ok(extensionSource.includes('existingSession.reveal();'));
+		assert.ok(extensionSource.includes('activePairingSession = session;'));
+		assert.ok(extensionSource.includes('if (activePairingSession !== session || sessionRevision !== pairingSessionRevision)'));
+		assert.ok(extensionSource.includes('if (activePairingSession !== completedSession)'));
+		assert.ok(extensionSource.includes('if (sessionRevision === pairingSessionRevision)'));
+		assert.ok(sessionSource.includes('DEFAULT_POLL_INTERVAL_MS = 3_000'));
+		assert.ok(sessionSource.includes('pollInFlight'));
 		assert.ok(extensionSource.includes("let alertsEnabled = false"));
 		assert.ok(extensionSource.includes("let connectionState: TelegramConnectionState = 'unknown'"));
 		assert.ok(extensionSource.includes('let connectionStateRevision = 0'));
