@@ -5,9 +5,16 @@ import * as vscode from 'vscode';
 import {
 	BackendClient,
 	BackendClientError,
+	InstallationCredentialRejectedError,
 	type InstallationCredentialStore,
 } from '../backend/BackendClient';
 import { SecretStore } from '../state/SecretStore';
+import {
+	canEnableAlerts,
+	resolveTelegramConnectionState,
+	statusBarText,
+	type TelegramConnectionClient,
+} from '../state/TelegramConnectionState';
 
 const INSTALLATION_CREDENTIAL = 'abcdefghijklmnopqrstuvwxyz0123456789_ABCDEF';
 const FRESH_INSTALLATION_CREDENTIAL = 'freshinstallationcredential0123456789_ABCDEF';
@@ -44,6 +51,13 @@ function pairingResponse(): Response {
 		expiresAt: PAIRING_EXPIRES_AT,
 	}), {
 		status: 201,
+		headers: { 'Content-Type': 'application/json' },
+	});
+}
+
+function telegramConnectionResponse(connected: boolean, extra: Record<string, unknown> = {}): Response {
+	return new Response(JSON.stringify({ connected, ...extra }), {
+		status: 200,
 		headers: { 'Content-Type': 'application/json' },
 	});
 }
@@ -265,6 +279,174 @@ suite('Extension Test Suite', () => {
 		);
 	});
 
+	test('getTelegramConnection authenticates GET requests and accepts exact boolean responses', async () => {
+		const paths: string[] = [];
+		const authorizations: string[] = [];
+		const client = new BackendClient(
+			'https://backend.example',
+			1_000,
+			async (input, init) => {
+				paths.push(new URL(input.toString()).pathname);
+				authorizations.push(new Headers(init?.headers).get('Authorization') ?? '');
+				return telegramConnectionResponse(paths.length === 1);
+			}
+		);
+
+		assert.strictEqual(await client.getTelegramConnection(INSTALLATION_CREDENTIAL), true);
+		assert.strictEqual(await client.getTelegramConnection(INSTALLATION_CREDENTIAL), false);
+		assert.deepStrictEqual(paths, ['/v1/telegram-connection', '/v1/telegram-connection']);
+		assert.deepStrictEqual(authorizations, [
+			`Bearer ${INSTALLATION_CREDENTIAL}`,
+			`Bearer ${INSTALLATION_CREDENTIAL}`,
+		]);
+	});
+
+	test('getTelegramConnection rejects malformed and extra-field responses', async () => {
+		for (const body of [{ connected: 'true' }, { connected: true, extra: 'unexpected' }]) {
+			const client = new BackendClient(
+				'https://backend.example',
+				1_000,
+				async () => new Response(JSON.stringify(body), { status: 200 })
+			);
+
+			await assert.rejects(
+				client.getTelegramConnection(INSTALLATION_CREDENTIAL),
+				(error: unknown) => error instanceof BackendClientError
+					&& !(error instanceof InstallationCredentialRejectedError)
+			);
+		}
+	});
+
+	test('getTelegramConnection classifies backend 401 as a rejected installation credential', async () => {
+		const client = new BackendClient(
+			'https://backend.example',
+			1_000,
+			async () => new Response(null, { status: 401 })
+		);
+
+		await assert.rejects(
+			client.getTelegramConnection(INSTALLATION_CREDENTIAL),
+			InstallationCredentialRejectedError
+		);
+	});
+
+	test('getTelegramConnection keeps timeout, network, and backend failures distinct from credential rejection', async () => {
+		const failureRequests: Array<typeof fetch> = [
+			async () => new Response(null, { status: 429 }),
+			async () => new Response(null, { status: 503 }),
+			async () => { throw new Error('network unavailable'); },
+		];
+
+		for (const request of failureRequests) {
+			const client = new BackendClient('https://backend.example', 1_000, request);
+			await assert.rejects(
+				client.getTelegramConnection(INSTALLATION_CREDENTIAL),
+				(error: unknown) => error instanceof BackendClientError
+					&& !(error instanceof InstallationCredentialRejectedError)
+			);
+		}
+
+		const timeoutClient = new BackendClient(
+			'https://backend.example',
+			5,
+			async (_input, init) => new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+			})
+		);
+		await assert.rejects(
+			timeoutClient.getTelegramConnection(INSTALLATION_CREDENTIAL),
+			(error: unknown) => error instanceof BackendClientError
+				&& !(error instanceof InstallationCredentialRejectedError)
+		);
+	});
+
+	test('connection-state resolution uses no backend request without a credential', async () => {
+		const store = new FakeCredentialStore();
+		let calls = 0;
+		const client: TelegramConnectionClient = {
+			getTelegramConnection: async () => {
+				calls += 1;
+				return true;
+			},
+		};
+
+		assert.strictEqual(await resolveTelegramConnectionState(store, client), 'disconnected');
+		assert.strictEqual(calls, 0);
+	});
+
+	test('connection-state resolution makes one GET and maps connected and disconnected responses', async () => {
+		for (const expected of [true, false]) {
+			const store = new FakeCredentialStore(INSTALLATION_CREDENTIAL);
+			let calls = 0;
+			const client: TelegramConnectionClient = {
+				getTelegramConnection: async (credential) => {
+					calls += 1;
+					assert.strictEqual(credential, INSTALLATION_CREDENTIAL);
+					return expected;
+				},
+			};
+
+			assert.strictEqual(
+				await resolveTelegramConnectionState(store, client),
+				expected ? 'connected' : 'disconnected'
+			);
+			assert.strictEqual(calls, 1);
+		}
+	});
+
+	test('connection-state resolution performs only the authoritative GET and never registers', async () => {
+		const store = new FakeCredentialStore(INSTALLATION_CREDENTIAL);
+		const requests: Array<{ method: string; path: string }> = [];
+		const client = new BackendClient('https://backend.example', 1_000, async (url, init) => {
+			requests.push({ method: init?.method ?? 'GET', path: new URL(url).pathname });
+			return telegramConnectionResponse(true);
+		});
+
+		assert.strictEqual(await resolveTelegramConnectionState(store, client), 'connected');
+		assert.deepStrictEqual(requests, [{ method: 'GET', path: '/v1/telegram-connection' }]);
+	});
+
+	test('connection-state resolution clears only definitively rejected credentials', async () => {
+		const rejectedStore = new FakeCredentialStore(INSTALLATION_CREDENTIAL);
+		const rejectedClient: TelegramConnectionClient = {
+			getTelegramConnection: async () => {
+				throw new InstallationCredentialRejectedError('rejected');
+			},
+		};
+		assert.strictEqual(await resolveTelegramConnectionState(rejectedStore, rejectedClient), 'disconnected');
+		assert.strictEqual(rejectedStore.credential, undefined);
+
+		const transientStore = new FakeCredentialStore(INSTALLATION_CREDENTIAL);
+		const transientClient: TelegramConnectionClient = {
+			getTelegramConnection: async () => { throw new BackendClientError('unavailable'); },
+		};
+		assert.strictEqual(await resolveTelegramConnectionState(transientStore, transientClient), 'unknown');
+		assert.strictEqual(transientStore.credential, INSTALLATION_CREDENTIAL);
+	});
+
+	test('connection-state resolution clears a syntactically invalid stored credential without a request', async () => {
+		const store = new FakeCredentialStore('invalid credential');
+		let requests = 0;
+		const client = new BackendClient('https://backend.example', 1_000, async () => {
+			requests += 1;
+			return telegramConnectionResponse(true);
+		});
+
+		assert.strictEqual(await resolveTelegramConnectionState(store, client), 'disconnected');
+		assert.strictEqual(store.credential, undefined);
+		assert.strictEqual(requests, 0);
+	});
+
+	test('connection-state presentation enforces canonical status text and ON invariants', () => {
+		assert.strictEqual(statusBarText('connected', false), '$(bell-slash) Codex Alerts: OFF · $(send) ✓');
+		assert.strictEqual(statusBarText('connected', true), '$(bell) Codex Alerts: ON · $(send) ✓');
+		assert.strictEqual(statusBarText('disconnected', true), '$(bell-slash) Codex Alerts: OFF · $(send) ✕');
+		assert.strictEqual(statusBarText('unknown', true), '$(bell-slash) Codex Alerts: OFF · $(send) ?');
+		assert.strictEqual(canEnableAlerts('connected'), true);
+		assert.strictEqual(canEnableAlerts('disconnected'), false);
+		assert.strictEqual(canEnableAlerts('unknown'), false);
+	});
+
 	test('disconnectTelegram sends an authenticated delete without clearing the installation credential', async () => {
 		let method: string | undefined;
 		let authorization: string | undefined;
@@ -331,6 +513,16 @@ suite('Extension Test Suite', () => {
 		assert.ok(extensionSource.includes('PAIRING_POLL_INTERVAL_MS = 3_000'));
 		assert.ok(extensionSource.includes('MAX_PAIRING_POLL_DURATION_MS'));
 		assert.ok(extensionSource.includes('vscode.env.openExternal'));
+		assert.ok(extensionSource.includes("let alertsEnabled = false"));
+		assert.ok(extensionSource.includes("let connectionState: TelegramConnectionState = 'unknown'"));
+		assert.ok(extensionSource.includes('let connectionStateRevision = 0'));
+		assert.ok(extensionSource.includes('connectionRefreshInFlight'));
+		assert.ok(extensionSource.includes('if (connectionRefreshInFlight !== undefined)'));
+		assert.ok(extensionSource.includes('return connectionRefreshInFlight;'));
+		assert.ok(extensionSource.includes('if (connectionStateRevision === refreshRevision)'));
+		assert.ok(extensionSource.includes('void refreshConnectionState();'));
+		assert.ok(extensionSource.includes("applyConnectionState('connected')"));
+		assert.ok(extensionSource.includes("applyConnectionState('disconnected')"));
 	});
 
 	test('workspace configuration cannot select the backend for authenticated requests', () => {
