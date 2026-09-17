@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import {
 	BackendClient,
 	BackendClientError,
+	InstallationCredentialRejectedError,
 	TelegramAlreadyConnectedError,
 	type InstallationCredentialStore,
 	type Pairing,
@@ -17,6 +18,7 @@ import {
 	TelegramPairingSession,
 	type PairingSessionState,
 } from './telegram/TelegramPairingSession';
+import { createTelegramDisconnectCommand } from './telegram/TelegramDisconnectCommand';
 import { TelegramPairingPanel } from './ui/TelegramPairingPanel';
 
 // This is application-owned, not read from workspace configuration. Replace it when the
@@ -64,6 +66,8 @@ export interface TelegramConnectCommandDependencies {
 
 export interface TelegramConnectCommand {
 	execute(intent?: TelegramConnectIntent): Promise<void>;
+	/** Cancels the current local attempt without changing server-side pairing state. */
+	cancelActiveSession(): void;
 	dispose(): void;
 	getActiveSession(): TelegramConnectSession | undefined;
 }
@@ -287,6 +291,14 @@ export function createTelegramConnectCommand(
 
 	return {
 		execute,
+		cancelActiveSession: () => {
+			// Invalidate callbacks before cancelling: TelegramPairingSession may still
+			// observe an in-flight trusted status response after local cancellation.
+			pairingSessionRevision += 1;
+			const session = activePairingSession;
+			activePairingSession = undefined;
+			session?.cancel();
+		},
 		dispose: () => {
 			pairingSessionRevision += 1;
 			activePairingSession?.dispose();
@@ -383,22 +395,33 @@ export function activate(context: vscode.ExtensionContext) {
 		connectFlow.execute
 	);
 
+	const disconnectFlow = createTelegramDisconnectCommand({
+		client: backendClient,
+		store: secretStore,
+		getConnectionState: () => connectionState,
+		beginAuthoritativeDisconnect: () => {
+			connectionStateRevision += 1;
+			return connectionStateRevision;
+		},
+		getConnectionStateRevision: () => connectionStateRevision,
+		applyConnectionState,
+		forceAlertsOff: () => {
+			alertsEnabled = false;
+			updateStatusBar();
+		},
+		cancelActivePairingSession: () => connectFlow.cancelActiveSession(),
+		isCredentialRejected: (error) => error instanceof InstallationCredentialRejectedError,
+		recoverRejectedCredential: () => secretStore.deleteInstallationCredential(),
+		showDisconnected: () => { void vscode.window.showInformationMessage('Telegram is disconnected.'); },
+		showAlreadyDisconnected: () => {
+			void vscode.window.showInformationMessage('Telegram is already disconnected.');
+		},
+		showError: (message) => { void vscode.window.showErrorMessage(message); },
+	});
+
 	const disconnectTelegramCommand = vscode.commands.registerCommand(
 		'far-away-from-codex.disconnectTelegram',
-		async () => {
-			try {
-				const credential = await secretStore.getInstallationCredential();
-				if (credential === undefined) {
-					throw new BackendClientError('No anonymous installation is registered.');
-				}
-
-				await backendClient.disconnectTelegram(credential);
-				applyConnectionState('disconnected');
-				void vscode.window.showInformationMessage('Telegram is disconnected.');
-			} catch (error) {
-				void vscode.window.showErrorMessage(safeErrorMessage(error, 'Could not disconnect Telegram.'));
-			}
-		}
+		disconnectFlow.execute
 	);
 
 	const testNotificationCommand = vscode.commands.registerCommand(

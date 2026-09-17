@@ -337,7 +337,10 @@ export class BackendClient {
 
 	private assertValidCredential(credential: string): void {
 		if (!this.isValidCredential(credential)) {
-			throw new BackendClientError('No anonymous installation is registered.');
+			// A malformed locally stored credential is definitively unusable. Keep it
+			// in the same recovery category as a server-side authentication rejection
+			// so callers never mistake it for an uncertain transport outcome.
+			throw new InstallationCredentialRejectedError('The anonymous installation credential was rejected.');
 		}
 	}
 
