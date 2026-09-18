@@ -56,17 +56,15 @@ export function createTelegramOnboarding(
 
 		const attemptRevision = lifecycleRevision;
 		const attempt = (async () => {
-			// Persist before awaiting UI so dismissal or reload cannot repeatedly nag.
-			await dependencies.globalState.update(TELEGRAM_ONBOARDING_SHOWN_KEY, true);
-			if (disposed || lifecycleRevision !== attemptRevision) {
-				return;
-			}
-
 			const selection = await dependencies.showPrompt(
 				TELEGRAM_ONBOARDING_MESSAGE,
 				TELEGRAM_ONBOARDING_CONNECT_BUTTON,
 				TELEGRAM_ONBOARDING_NOT_NOW_BUTTON
 			);
+			// A failed presentation must remain eligible for a later activation.
+			// Once the prompt resolves, including normal dismissal, persist before
+			// permitting any action so reload cannot turn it into a repeated prompt.
+			await dependencies.globalState.update(TELEGRAM_ONBOARDING_SHOWN_KEY, true);
 			if (disposed || lifecycleRevision !== attemptRevision) {
 				return;
 			}

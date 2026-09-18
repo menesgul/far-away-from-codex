@@ -229,6 +229,34 @@ suite('TelegramOnboarding', () => {
 		}
 	});
 
+	test('a failed prompt presentation leaves onboarding eligible for a later activation retry', async () => {
+		const globalState = new FakeOnboardingState();
+		let promptCalls = 0;
+		const onboarding = createTelegramOnboarding({
+			globalState,
+			showPrompt: async () => {
+				promptCalls += 1;
+				if (promptCalls === 1) {
+					throw new Error('notification presentation failed');
+				}
+				return 'Not now';
+			},
+			connectTelegram: async () => undefined,
+		});
+
+		await assert.rejects(
+			onboarding.maybeShow('disconnected'),
+			/notification presentation failed/
+		);
+		assert.strictEqual(globalState.get<boolean>(TELEGRAM_ONBOARDING_SHOWN_KEY), undefined);
+		assert.deepStrictEqual(globalState.updates, []);
+
+		await onboarding.maybeShow('disconnected');
+
+		assert.strictEqual(promptCalls, 2);
+		assert.strictEqual(globalState.get<boolean>(TELEGRAM_ONBOARDING_SHOWN_KEY), true);
+	});
+
 	test('onboarding Connect Telegram invokes the production Connect seam once with connect-only intent', async () => {
 		const harness = createOnboardingHarness({ selection: 'Connect Telegram' });
 
@@ -240,6 +268,7 @@ suite('TelegramOnboarding', () => {
 		assert.strictEqual(harness.connectionCalls, 1);
 		assert.strictEqual(harness.pairingCalls, 1);
 		assert.strictEqual(harness.alertsEnabled, false);
+		assert.strictEqual(harness.globalState.get<boolean>(TELEGRAM_ONBOARDING_SHOWN_KEY), true);
 		harness.sessions[0].emitConnected();
 		harness.sessions[0].emitTerminal('connected');
 		assert.strictEqual(harness.alertsEnabled, false);
@@ -271,7 +300,7 @@ suite('TelegramOnboarding', () => {
 		await onboarding.maybeShow('disconnected');
 
 		assert.strictEqual(updateCalls, 2);
-		assert.strictEqual(promptCalls, 1);
+		assert.strictEqual(promptCalls, 2);
 		assert.strictEqual(globalState.get<boolean>(TELEGRAM_ONBOARDING_SHOWN_KEY), true);
 	});
 
@@ -290,22 +319,23 @@ suite('TelegramOnboarding', () => {
 		assert.strictEqual(harness.ensureCalls, 1);
 	});
 
-	test('disposal during pending flag persistence prevents a stale prompt', async () => {
+	test('disposal during pending flag persistence prevents a stale prompt action', async () => {
 		const globalState = new FakeOnboardingState();
 		const update = new Deferred<void>();
 		globalState.updateGate = update;
-		const harness = createOnboardingHarness({ globalState });
+		const harness = createOnboardingHarness({ globalState, selection: 'Connect Telegram' });
 		const attempt = harness.onboarding.maybeShow('disconnected');
+		await settlePromises();
 
 		assert.deepStrictEqual(globalState.updates, [{
 			section: TELEGRAM_ONBOARDING_SHOWN_KEY,
 			value: true,
 		}]);
-		assert.strictEqual(harness.promptCalls, 0);
+		assert.strictEqual(harness.promptCalls, 1);
 		harness.onboarding.dispose();
 		update.resolve();
 		await attempt;
-		assert.strictEqual(harness.promptCalls, 0);
+		assert.strictEqual(harness.promptCalls, 1);
 		assert.strictEqual(harness.connectDelegations, 0);
 	});
 
@@ -319,6 +349,7 @@ suite('TelegramOnboarding', () => {
 		harness.onboarding.dispose();
 		selection.resolve('Connect Telegram');
 		await attempt;
+		assert.strictEqual(harness.globalState.get<boolean>(TELEGRAM_ONBOARDING_SHOWN_KEY), true);
 		assert.strictEqual(harness.connectDelegations, 0);
 		assert.strictEqual(harness.ensureCalls, 0);
 	});
