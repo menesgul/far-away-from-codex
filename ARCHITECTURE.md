@@ -10,8 +10,8 @@ The system should be:
    - one-click ON/OFF after first-time setup.
 
 2. **Local-first with a minimal hosted relay**
-   - Codex event collection, normalization, session labeling, Away Mode, redaction, and notification formatting stay local,
-   - a privacy-limited backend exists only for Telegram pairing, anonymous installation mapping, and delivery,
+   - Codex event collection, normalization, session labeling, Away Mode, redaction, truncation, and user-visible notification semantics stay local,
+   - a privacy-limited backend exists only for V1 Telegram pairing, anonymous installation mapping, and delivery,
    - no user accounts and no remote control.
 
 3. **Non-invasive**
@@ -39,18 +39,18 @@ Codex IDE
 Local Bridge
     ↓ loopback HTTP + runtime nonce
 VS Code Extension
-    ↓ authenticated HTTPS
+    ↓ authenticated HTTPS: SanitizedNotificationEnvelope
 Far Away From Codex Backend
 Cloudflare Worker
     ├── D1
-    └── Telegram Bot API
+    └── NotificationDispatcher → TelegramDelivery (V1) → Telegram Bot API
              ↓
       Official Far Away From Codex Bot
              ↓
           User phone
 ```
 
-The local Codex hook-to-extension bridge remains required. The hosted backend does not replace it; the backend begins only after the extension has validated, normalized, redacted, and formatted an event.
+The local Codex hook-to-extension bridge remains required. The hosted backend does not replace it; the backend begins only after the extension has validated, normalized, deduplicated, labeled, Away-Mode-gated, redacted, truncated, and made the event display-ready as a provider-neutral notification envelope.
 
 ## 2.1 Telegram pairing path
 
@@ -96,7 +96,7 @@ The bridge is transport only.
 
 It must **not**:
 - decide whether something is Finished/Failed,
-- format Telegram messages,
+- determine user-visible notification semantics,
 - store backend or Telegram credentials,
 - approve/deny Codex requests,
 - block a Codex action.
@@ -283,7 +283,7 @@ Responsibilities:
 - create a one-time Telegram pairing,
 - check pairing status,
 - disconnect Telegram,
-- send an already-redacted, already-formatted notification,
+- submit an already-sanitized, display-ready `SanitizedNotificationEnvelope`,
 - use bounded timeouts and translate backend errors safely.
 
 It must never:
@@ -297,9 +297,9 @@ Installation registration is lazy. On activation, the extension first reads Secr
 
 `POST /v1/notifications` is attempted exactly once in V1 and is never automatically retried by the extension. A lost response after successful Worker delivery creates an uncertain outcome; retrying could duplicate the Telegram message. The extension reports delivery as uncertain/failed locally and does not affect Codex. Read-only/idempotent operations such as pairing-status checks may use bounded retries. Future notification retries require an explicit idempotency key or client-generated delivery ID plus short-lived server-side deduplication state; V1 does not implement that mechanism.
 
-`Far Away From Codex: Test Notification` is a connection diagnostic, not a Codex event notification. It sends exactly one test message through `BackendClient` whether Away Mode is ON or OFF, and fails clearly when Telegram is not connected or backend delivery fails. Away Mode gates only real Codex event notifications.
+`Far Away From Codex: Test Notification` is a connection diagnostic, not a Codex event notification. It submits exactly one display-ready test envelope through `BackendClient` whether Away Mode is ON or OFF, and fails clearly when Telegram is not connected or backend delivery fails. Away Mode gates only real Codex event notifications.
 
-## 4.7 Cloudflare Worker
+## 4.7 Cloudflare Worker and delivery boundary
 
 The Worker is an intentionally small pairing and relay service.
 
@@ -308,7 +308,7 @@ Responsibilities:
 - read authoritative Telegram connection state and create/check one-time pairings,
 - validate and handle the Telegram webhook,
 - perform bounded D1 operations,
-- relay sanitized notification text through the official bot,
+- accept a minimal sanitized/display-ready notification envelope and route it through the V1 Telegram delivery adapter,
 - translate Telegram API failures,
 - disconnect Telegram and revoke installation access where appropriate,
 - enforce request/body limits, rate limits, and abuse protection.
@@ -326,10 +326,46 @@ The bot token and webhook secret exist only in Cloudflare Worker secret storage.
 
 The Worker must not:
 - store notification bodies or raw Codex events,
+- receive raw tool payloads, transcripts, environment dumps, unredacted commands, or secrets,
 - control Codex or execute user commands,
 - create user accounts,
 - retain notification history or unnecessary personal data,
 - expose the official bot token.
+
+### Notification delivery contract
+
+`POST /v1/notifications` is provider-neutral. The extension submits one authenticated `SanitizedNotificationEnvelope`; it does not submit a Telegram-specific message or raw Codex event. Its conceptual, versioned shape is deliberately small:
+
+```ts
+interface SanitizedNotificationEnvelope {
+  version: 1;
+  kind: string;
+  title: string;
+  sessionLabel?: string;
+  summary?: string;
+  action?: string;
+  reason?: string;
+  detail?: string;
+}
+```
+
+This is a boundary contract, not a premature inventory of every future event field. Fields not proven useful by an event are omitted. Before the envelope leaves the extension, every user-visible value is validated, normalized, session-labeled where applicable, deduplicated, redacted, bounded/truncated, and display-ready. Real Codex event notifications are Away-Mode-gated before network work; `Far Away From Codex: Test Notification` is the diagnostic exception and may submit its sanitized test envelope while Away Mode is OFF. The Worker receives no raw Codex event, raw tool payload, transcript, environment dump, unredacted command, or secret.
+
+The conceptual Worker boundary is:
+
+```text
+NotificationDispatcher
+    → TelegramDelivery (V1)
+    → future AppleDelivery
+```
+
+`NotificationDispatcher` performs authenticated notification routing only. A delivery adapter may serialize already-safe envelope fields for its provider: `TelegramDelivery` produces V1 Telegram text, and a future Apple adapter could produce an APNs/Live Activity representation. Adapters must not infer semantics, summarize with AI, detect secrets, or interpret raw events. The Telegram Bot API transport therefore belongs to `TelegramDelivery`, not generic notification routing.
+
+V1 implements only `TelegramDelivery`; this boundary does not introduce multiple-provider runtime behavior, generic provider connection state, delivery-target storage, fan-out, fallback, retries across providers, or provider-selection UI.
+
+### Future native iOS scope (not V1)
+
+A future native iOS companion may use APNs, WidgetKit, ActivityKit/Live Activities, and Lock Screen/Dynamic Island presentation. It may bind to the same anonymous installation identity through a future explicit pairing flow. That work is not a V1 requirement and must not expand the current Telegram release scope.
 
 ## 4.8 D1 data model
 
@@ -356,7 +392,7 @@ created_at
 
 Useful indexes include `credential_hash`, `token_hash`, and active pairings by `installation_id`/`expires_at`. Installation credentials and pairing tokens are stored only as cryptographic hashes. Pairing tokens are short-lived and single-use; consumed or expired tokens cannot bind another chat.
 
-D1 contains no notification-body/history table, Codex-event table, or user-profile table. It may store the Telegram chat ID because delivery requires the server-side association.
+D1 contains no notification-body/history table, Codex-event table, or user-profile table. The anonymous installation credential remains the provider-independent identity/authentication boundary. `installations.telegram_chat_id` is an acceptable V1 Telegram specialization and remains unchanged because V1 delivery requires that server-side association. Do not migrate it or add speculative delivery-target storage now. A future iOS provider may need a separate delivery-target/device association and a migration designed only when that implementation begins.
 
 ### Data lifecycle
 
@@ -402,8 +438,8 @@ POST /v1/telegram/webhook
 
 POST /v1/notifications
   Require installation bearer authentication.
-  Accept only final sanitized, formatted text within a bounded body size.
-  Look up the paired chat_id, attempt one forward through the official bot, and discard the body.
+  Accept only one minimal sanitized/display-ready notification envelope within a bounded body size.
+  In V1, route it through TelegramDelivery, which looks up the paired chat_id, serializes safe fields to Telegram text, attempts one send through the official bot, and discards the body.
   Do not rely on extension retries; V1 has no notification idempotency mechanism.
 
 DELETE /v1/telegram-connection
@@ -419,6 +455,8 @@ DELETE /v1/installation
 Pairing tokens use cryptographically secure randomness, are stored only as hashes, expire quickly, require exact matching, and are consumed once. The `/start` token necessarily appears transiently in Telegram during QR/deep-link pairing; it is not a long-lived credential. The extension renders the returned `telegramUrl` as a QR code locally in a transient pairing UI; it never sends pairing material to an external QR-generation service and never persists or logs it. A user may explicitly choose Copy Link or Open on This Device; only the latter may call `vscode.env.openExternal()`, and it must never happen automatically. Pairing never trusts a Telegram username and accepts private chats only.
 
 `Far Away From Codex: Disconnect Telegram` immediately forces local Away Mode OFF, then calls authenticated `DELETE /v1/telegram-connection`. A definitive DELETE success clears the server-side chat association and relevant pending pairings while keeping the installation identity and credential valid, and renders `OFF + ✕`. If DELETE fails, times out, or has an uncertain result, render `OFF + ?`, show a safe local error/retry message, and do not claim Telegram is disconnected; a later successful authoritative `GET /v1/telegram-connection` may resolve the indicator to `✓` or `✕`. `DELETE /v1/installation` resets/revokes the anonymous installation itself, invalidates its credential and pending pairings, and clears its Telegram association. Installation reset is a recovery path, not an everyday action. Neither operation affects the official bot token, and neither is user-account deletion because no user account exists.
+
+Telegram pairing, `GET /v1/telegram-connection`, Disconnect Telegram, the `✓`/`✕`/`?` indicator, and the QR workflow remain Telegram-specific V1 concepts. Do not rename them into generic provider-connection abstractions. A future iOS pairing/connection state may coexist separately when it exists.
 
 ## 4.10 Trust boundaries
 
@@ -461,7 +499,7 @@ The Worker builds `https://t.me/<official-bot>?start=<pairing-token>` from `TELE
 - `POST /v1/pairings` is installation-authenticated, rate-limited per installation, and prevents unlimited concurrent active pairings.
 - `GET /v1/telegram-connection` is installation-authenticated, scoped to its installation, returns only `{ connected: boolean }`, and is rate-limited to a reasonable activation- and command-driven read frequency.
 - `GET /v1/pairings/:id` is installation-authenticated, scoped to its installation, and limited to a reasonable polling frequency; clients must not poll aggressively.
-- `POST /v1/notifications` is installation-authenticated, rate-limited per installation, and enforces a bounded message length/body.
+- `POST /v1/notifications` is installation-authenticated, rate-limited per installation, and enforces a bounded notification-envelope/body size.
 - `POST /v1/telegram/webhook` validates the webhook secret before processing, enforces a bounded body, and safely rejects malformed or unsupported updates.
 
 V1 adds no CAPTCHA, Turnstile, login, or account system. Those controls require evidence of abuse before consideration; pairing remains low-friction.
@@ -792,13 +830,15 @@ Check Away Mode
       ↓
 Redact Sensitive Text
       ↓
-Format Final Notification
+Build SanitizedNotificationEnvelope
       ↓
 BackendClient
       ↓ authenticated HTTPS
 Cloudflare Worker
       ↓
-Telegram Bot API
+NotificationDispatcher
+      ↓
+TelegramDelivery (V1) → Telegram Bot API
       ↓
 User phone
 ```
@@ -808,7 +848,7 @@ Order matters.
 Especially:
 - deduplicate before sending,
 - Away Mode check before network work,
-- redact and format before `BackendClient`,
+- determine the user-visible semantic fields, redact, truncate, and build the envelope before `BackendClient`,
 - never send raw Codex events or raw tool payloads to the backend.
 
 ---
@@ -835,9 +875,9 @@ Do not persist notification history in V1.
 
 ---
 
-# 9. Message Formatting
+# 9. User-visible notification semantics
 
-Telegram messages should be lock-screen friendly.
+The extension determines lock-screen-friendly user-visible semantics. The examples below show the V1 Telegram serialization of safe envelope fields; Telegram markup/text layout is not the notification-domain contract.
 
 # 9.1 Finished
 
@@ -923,13 +963,13 @@ For V1:
 - use conservative deterministic redaction,
 - truncate overly long commands,
 - never send complete environment dumps,
-- complete redaction and formatting locally before network transmission.
+- complete validation, normalization, session labeling, Away Mode gating, deduplication, redaction, truncation, and display-ready envelope construction locally before network transmission.
 
-The backend necessarily sees the final Telegram-ready message transiently so it can forward it. This is not end-to-end encryption, and the architecture does not claim the Worker is technically unable to observe an in-transit message. The privacy boundary is data minimization: the Worker receives only final sanitized text, forwards it to Telegram, and discards it.
+The backend transiently observes only the sanitized notification envelope required for delivery. In V1, `TelegramDelivery` transiently creates and sends the final Telegram representation. This is not end-to-end encryption, and the architecture does not claim the Worker or a delivery provider is technically unable to observe in-transit delivery content. The privacy boundary is data minimization: no raw Codex events, raw tool payloads, transcripts, environment dumps, unredacted commands, or secrets are transmitted.
 
-Notification bodies must never be written to D1 or intentionally logged. Raw Codex events and raw tool payloads must never leave the extension. No notification history is retained.
+No notification envelope/body is written to D1 or intentionally logged, and no notification history is retained. Raw Codex events and raw tool payloads must never leave the extension.
 
-A public privacy statement is a required V1 release artifact. It must accurately cover stored anonymous installation state, credential hashes, Telegram chat IDs, temporary pairing metadata, transient sanitized-message processing by the Worker and Telegram, excluded data, and disconnect/reset behavior. It must not claim end-to-end encryption.
+A public privacy statement is a required V1 release artifact. It must accurately cover stored anonymous installation state, credential hashes, Telegram chat IDs, temporary pairing metadata, transient sanitized-envelope processing by the Worker and Telegram, excluded data, and disconnect/reset behavior. It must not claim end-to-end encryption.
 
 ---
 
@@ -943,7 +983,7 @@ getTelegramConnection(): Promise<{ connected: boolean }>
 createPairing(): Promise<Pairing>
 getPairingStatus(pairingId: string): Promise<PairingStatus>
 disconnectTelegram(): Promise<void>
-sendNotification(message: string): Promise<SendResult>
+sendNotification(envelope: SanitizedNotificationEnvelope): Promise<SendResult>
 ```
 
 Responsibilities:
@@ -951,7 +991,7 @@ Responsibilities:
 - anonymous installation registration,
 - authoritative connection-state lookup, pairing creation, and status checks,
 - disconnect requests,
-- sending only sanitized, formatted notification text,
+- sending only sanitized, display-ready notification envelopes,
 - bounded timeouts and safe backend error reporting.
 
 Must not:
@@ -967,7 +1007,7 @@ Recommended behavior:
 
 Future notification retry support requires an explicit idempotency key/delivery ID and short-lived server-side deduplication state before retries can be enabled.
 
-Telegram Bot API client logic belongs in the Worker, not in the VS Code extension.
+Telegram Bot API client logic belongs in the V1 Worker `TelegramDelivery` adapter, not in the VS Code extension or generic notification routing.
 
 ---
 
@@ -1218,7 +1258,8 @@ Prefer:
 - VS Code SecretStorage for the client installation credential,
 - Codex lifecycle hooks,
 - local loopback bridge,
-- deterministic message formatting,
+- provider-neutral sanitized notification envelope with deterministic local semantic preparation,
+- TelegramDelivery as the only V1 delivery adapter,
 - best-effort session label.
 
 ## Avoid
@@ -1228,10 +1269,12 @@ Prefer:
 - Telegram replies or approval actions controlling Codex,
 - login/signup, email authentication, OAuth accounts, and admin/web frontends,
 - analytics, telemetry, billing, subscriptions, and dashboards,
-- multiple delivery providers and WhatsApp,
+- multiple delivery-provider runtime behavior, delivery-target storage, and WhatsApp,
 - AI-generated summaries,
 - UI scraping,
 - unstable transcript parsing.
+
+V1 remains Telegram-only. Preserving a provider-neutral envelope and a thin Worker adapter boundary is deliberate future compatibility, not an implementation of multiple providers. A future installation may eventually have more than one delivery target, but simultaneous delivery, fan-out, partial success, retries across providers, provider priority/fallback, and their UI are deferred until a second provider exists.
 
 ## Fundamental V1 promise
 

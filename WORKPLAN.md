@@ -63,7 +63,7 @@ Do **not** add:
 
 Telegram setup is QR-first in V1. Do not add a short human pairing-code fallback. V1 does include one lightweight, local first-activation onboarding prompt; only its explicit Connect Telegram action delegates to the normal Connect command. Notification relay remains Slice E, not Slice D.
 
-The product remains local-first for Codex processing. Its intentionally small hosted component is limited to anonymous installation authentication, Telegram pairing, and relaying final sanitized notification text through the official bot.
+The product remains local-first for Codex processing. Its intentionally small hosted component is limited to anonymous installation authentication, Telegram pairing, and V1 delivery through the official bot. The anonymous installation credential remains provider-independent identity/authentication; `installations.telegram_chat_id` remains an unchanged V1 specialization. V1 does not implement multiple delivery providers; it only preserves a provider-neutral sanitized notification-envelope boundary so a later provider does not require redesigning the local Codex pipeline.
 
 ---
 
@@ -137,7 +137,7 @@ Do not move to external integrations until all are true:
 
 # 2. External Integration and Event Feasibility
 
-This phase implements and proves external boundaries before the real Codex alert event features. Phase 2.1 is realized by implementation Slices B through E: Worker foundation, anonymous installation authentication, Telegram pairing, and test-notification relay. Complete Phase 2.1 before using Phase 2.2–2.7 to prove Codex event sources and local integration feasibility. Gate 2 permits and requires that Phase 2.1 work; it blocks the later Finished/Approval/Failure/MCP feature implementation until all integration sources are proven.
+This phase implements and proves external boundaries before the real Codex alert event features. Phase 2.1 is realized by implementation Slices B through E: Worker foundation, anonymous installation authentication, Telegram pairing, and Telegram-only test-notification delivery behind the provider-neutral envelope boundary. Complete Phase 2.1 before using Phase 2.2–2.7 to prove Codex event sources and local integration feasibility. Gate 2 permits and requires that Phase 2.1 work; it blocks the later Finished/Approval/Failure/MCP feature implementation until all integration sources are proven.
 
 ## 2.1 Telegram proof of concept
 The project owner creates one official Far Away From Codex bot with BotFather. End users never create bots or handle Telegram credentials.
@@ -145,10 +145,10 @@ The project owner creates one official Far Away From Codex bot with BotFather. E
 Prove delivery:
 
 ```text
-VS Code extension
-        ↓
-Cloudflare Worker
-        ↓
+VS Code extension: SanitizedNotificationEnvelope
+        ↓ POST /v1/notifications
+Cloudflare Worker: NotificationDispatcher
+        ↓ TelegramDelivery (V1)
 Official Far Away From Codex Telegram bot
         ↓
 Phone
@@ -202,6 +202,8 @@ Requirements to prove:
 - end users enter no bot token, chat ID, phone number, or account information,
 - the extension can observe pending/connected/expired pairing status,
 - Test Notification travels through the Worker and official bot,
+- `POST /v1/notifications` accepts only one authenticated, bounded, sanitized/display-ready notification envelope; it never receives raw Codex events, raw tool payloads, transcripts, environment dumps, unredacted commands, or secrets,
+- V1 routes that envelope only through `TelegramDelivery`; no multiple-provider runtime behavior, delivery-target storage, or generic provider connection state is introduced,
 - notification bodies are neither persisted nor intentionally logged,
 - notification submission is attempted once without automatic retry,
 - definitive successful Disconnect clears the server-side chat association and invalidates pending pairings while keeping the installation credential valid; failed or uncertain Disconnect remains `OFF + ?` until a later authoritative read resolves it,
@@ -492,8 +494,8 @@ Behavior:
 ### ON
 - require verified Telegram connection state before enabling,
 - process supported Codex events locally,
-- redact and format notifications locally,
-- relay final sanitized messages through the backend.
+- validate, normalize, label, Away-Mode-gate, deduplicate, redact, truncate, and make notification semantics display-ready locally,
+- submit the resulting sanitized notification envelope to the provider-neutral endpoint; V1 then delivers only through Telegram.
 
 Persist the user's preferred state across normal VS Code restarts only if testing shows that behavior is intuitive. Otherwise default to OFF for safety.
 
@@ -569,7 +571,7 @@ Example:
 Telegram notifications are working.
 ```
 
-The extension sends this final sanitized text to `BackendClient`. The Worker looks up the paired chat ID, attempts exactly one message through the official bot, and does not persist the body. The extension must not automatically retry this notification POST.
+The extension sends one display-ready `SanitizedNotificationEnvelope` to `BackendClient`. The Worker routes it through V1 `TelegramDelivery`, which looks up the paired chat ID, serializes only safe fields to Telegram text, attempts exactly one message through the official bot, and does not persist the envelope/body. The extension must not automatically retry this notification POST.
 
 Test Notification is a setup/connection diagnostic and works independently of `Codex Alerts: ON/OFF`. It must send exactly one test message even when Away Mode is OFF, and fail clearly when Telegram is not connected or backend delivery fails. Away Mode controls only real Codex event notifications.
 
@@ -667,6 +669,35 @@ Sanitize excessively long commands.
 ---
 
 # 6. Notification Formatting
+
+Before any delivery request, the extension creates the provider-neutral notification-domain contract:
+
+```ts
+interface SanitizedNotificationEnvelope {
+  version: 1;
+  kind: string;
+  title: string;
+  sessionLabel?: string;
+  summary?: string;
+  action?: string;
+  reason?: string;
+  detail?: string;
+}
+```
+
+This is conceptual and versioned, not a frozen list of unproven event fields. Omit fields that an event has not established as useful. Every included user-visible value must already be validated, normalized, session-labeled where applicable, deduplicated, redacted, bounded/truncated, and display-ready before it leaves the extension. Real Codex event notifications are Away-Mode-gated before network work; `Far Away From Codex: Test Notification` is the diagnostic exception and may submit its sanitized test envelope while Away Mode is OFF. The Worker must never receive raw Codex events, raw tool payloads, transcripts, environment dumps, unredacted commands, or secrets.
+
+The Worker receives this envelope at `POST /v1/notifications` and uses a thin conceptual boundary:
+
+```text
+NotificationDispatcher
+    ↓
+TelegramDelivery (V1)
+    ↓
+Official bot
+```
+
+`TelegramDelivery` may serialize safe fields to V1 Telegram text. It must not infer notification meaning, summarize with AI, detect secrets, or interpret raw events; the Telegram Bot API transport is not generic routing logic. A future `AppleDelivery` may serialize the same safe envelope only when an iOS implementation exists. V1 remains Telegram-only: do not add multi-provider behavior, generic provider connection state, delivery-target storage, or provider-selection UI now.
 
 ## 6.1 Finished
 
@@ -768,7 +799,7 @@ Never log:
 - full sensitive commands by default,
 - secrets found in tool payloads.
 
-Implement deterministic redaction and final formatting locally before calling the backend. Never transmit raw Codex events or raw tool payloads to the Worker.
+Implement deterministic redaction, truncation, and display-ready envelope construction locally before calling the backend. Never transmit raw Codex events, raw tool payloads, transcripts, environment dumps, unredacted commands, or secrets to the Worker.
 
 ## 7.5 Hosted API security
 
@@ -782,7 +813,7 @@ Implement deterministic redaction and final formatting locally before calling th
 - make `POST /v1/pairings` refuse an authenticated installation that already has a Telegram chat association, returning safe `409 ALREADY_CONNECTED` without a chat ID, token, or URL,
 - require installation authentication for `GET /v1/telegram-connection`, return only `{ connected: boolean }`, and rate-limit it to reasonable activation- and command-driven reads,
 - require installation authentication for `GET /v1/pairings/:id` and enforce reasonable, non-aggressive polling,
-- rate-limit `POST /v1/notifications` per installation and enforce bounded message/body length,
+- rate-limit `POST /v1/notifications` per installation and enforce bounded notification-envelope/body length,
 - validate the webhook secret before processing `POST /v1/telegram/webhook`, bound its body, and safely reject malformed/unsupported updates,
 - use bounded request timeouts and no infinite retry path,
 - make pairing tokens short-lived, exact-match, private-chat-only, and single-use,
@@ -907,14 +938,31 @@ Tests:
 
 Review before Slice E.
 
-## 8.5 Slice E — Test notification relay
+## 8.5 Slice E — Telegram-only notification delivery behind the envelope boundary
 Code:
-- locally sanitized test message,
-- authenticated notification endpoint,
-- server-side chat lookup,
+- construct a locally sanitized/display-ready test `SanitizedNotificationEnvelope`,
+- authenticated provider-neutral `POST /v1/notifications` endpoint,
+- Worker notification routing through a thin `NotificationDispatcher` → `TelegramDelivery` V1 boundary,
+- server-side Telegram chat lookup inside `TelegramDelivery`,
 - bounded Telegram Bot API send,
 - exactly one extension submission attempt with no automatic retry,
 - no message-body persistence or intentional logging.
+
+Conceptual path:
+
+```text
+Extension: SanitizedNotificationEnvelope
+    ↓
+POST /v1/notifications
+    ↓
+Worker notification routing
+    ↓
+Telegram delivery adapter
+    ↓
+Official bot
+```
+
+Do not add another provider, iOS/APNs behavior, delivery-target schema, a `telegram/messages` endpoint, generic provider-connection UX, or multiple-provider semantics in this slice.
 
 Tests:
 - exactly one relay,
@@ -1115,7 +1163,9 @@ Add:
 The V1 privacy statement is a required release deliverable. It must truthfully explain:
 - stored data: anonymous installation record, credential hash, Telegram chat ID, and pairing metadata while needed,
 - excluded data: notification bodies/history, raw Codex events, raw tool payloads, phone number, email, Telegram username as identity, analytics, and telemetry,
-- final sanitized notification text transits the Worker and Telegram,
+- the Worker transiently observes only the sanitized notification envelope required for delivery; V1 `TelegramDelivery` transiently creates/sends the final Telegram representation,
+- raw Codex events, raw tool payloads, transcripts, environment dumps, unredacted commands, and secrets are not transmitted,
+- no notification envelope/body is persisted or intentionally logged,
 - there is no end-to-end encryption claim,
 - Telegram disconnect versus installation reset/revocation behavior.
 
@@ -1185,6 +1235,10 @@ If a stable public route becomes available:
 - use Codex user-facing thread name directly.
 
 Never depend on undocumented UI scraping.
+
+## 14.3 Native iOS / Live Activity delivery
+
+When a second provider is actually undertaken, design an explicit iOS pairing flow and any required delivery-target/device association then. A native companion may use APNs, WidgetKit, ActivityKit/Live Activities, and Lock Screen/Dynamic Island presentation while binding to the existing anonymous installation identity. This is future scope only and is not a V1 Definition of Done requirement; defer delivery fan-out, partial-success, retry, priority/fallback, and provider-selection decisions until then.
 
 ---
 
