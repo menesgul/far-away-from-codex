@@ -11,19 +11,21 @@ import {
 	type Pairing,
 	type PairingStatus,
 } from '../backend/BackendClient';
+import { createTelegramAlertsToggleCommand } from '../telegram/TelegramAlertsToggleCommand';
+import { createTelegramConnectionStateRefresh } from '../state/TelegramConnectionStateRefresh';
 import {
-	createTelegramAlertsToggleCommand,
-	createTelegramConnectionStateRefresh,
 	createTelegramConnectCommand,
-	createTelegramOnboarding,
-	TELEGRAM_ONBOARDING_SHOWN_KEY,
-	runTelegramActivationOnboarding,
 	type TelegramConnectSession,
 	type TelegramConnectSessionCallbacks,
 	type TelegramConnectIntent,
+} from '../telegram/TelegramConnectCommand';
+import {
+	createTelegramOnboarding,
+	TELEGRAM_ONBOARDING_SHOWN_KEY,
+	runTelegramActivationOnboarding,
 	type TelegramOnboarding,
 	type TelegramOnboardingState,
-} from '../extension';
+} from '../telegram/TelegramOnboarding';
 import { SecretStore } from '../state/SecretStore';
 import {
 	canEnableAlerts,
@@ -2331,23 +2333,27 @@ suite('Extension Test Suite', () => {
 		};
 		const commands = packageJson.contributes?.commands?.map((command) => command.command) ?? [];
 		const extensionSource = fs.readFileSync(path.resolve(__dirname, '../../src/extension.ts'), 'utf8');
+		const connectSource = fs.readFileSync(path.resolve(__dirname, '../../src/telegram/TelegramConnectCommand.ts'), 'utf8');
+		const refreshSource = fs.readFileSync(path.resolve(__dirname, '../../src/state/TelegramConnectionStateRefresh.ts'), 'utf8');
+		const onboardingSource = fs.readFileSync(path.resolve(__dirname, '../../src/telegram/TelegramOnboarding.ts'), 'utf8');
+		const toggleSource = fs.readFileSync(path.resolve(__dirname, '../../src/telegram/TelegramAlertsToggleCommand.ts'), 'utf8');
 
 		assert.ok(commands.includes('far-away-from-codex.connectTelegram'));
 		assert.ok(commands.includes('far-away-from-codex.disconnectTelegram'));
 		const sessionSource = fs.readFileSync(path.resolve(__dirname, '../../src/telegram/TelegramPairingSession.ts'), 'utf8');
 		assert.ok(extensionSource.includes('createTelegramConnectCommand'));
-		assert.ok(extensionSource.includes('let activePairingSession: TelegramConnectSession | undefined'));
-		assert.strictEqual(extensionSource.includes('pairingInProgress'), false);
-		assert.strictEqual(extensionSource.includes('withProgress'), false);
-		assert.ok(extensionSource.includes('getTelegramConnection(credential)'));
-		assert.ok(extensionSource.includes('createPairing(credential)'));
+		assert.ok(connectSource.includes('let activePairingSession: TelegramConnectSession | undefined'));
+		assert.strictEqual([extensionSource, connectSource, refreshSource, onboardingSource, toggleSource].some((source) => source.includes('pairingInProgress')), false);
+		assert.strictEqual([extensionSource, connectSource, refreshSource, onboardingSource, toggleSource].some((source) => source.includes('withProgress')), false);
+		assert.ok(connectSource.includes('getTelegramConnection(credential)'));
+		assert.ok(connectSource.includes('createPairing(credential)'));
 		assert.ok(extensionSource.includes('createTelegramAlertsToggleCommand'));
-		assert.ok(extensionSource.includes("if (existingSession.state === 'expired')"));
-		assert.ok(extensionSource.includes('existingSession.reveal();'));
-		assert.ok(extensionSource.includes('activePairingSession = session;'));
-		assert.ok(extensionSource.includes('if (activePairingSession !== session || sessionRevision !== pairingSessionRevision)'));
-		assert.ok(extensionSource.includes('if (activePairingSession !== completedSession)'));
-		assert.ok(extensionSource.includes('sessionConnectionStateRevision === dependencies.getConnectionStateRevision()'));
+		assert.ok(connectSource.includes("if (existingSession.state === 'expired')"));
+		assert.ok(connectSource.includes('existingSession.reveal();'));
+		assert.ok(connectSource.includes('activePairingSession = session;'));
+		assert.ok(connectSource.includes('if (activePairingSession !== session || sessionRevision !== pairingSessionRevision)'));
+		assert.ok(connectSource.includes('if (activePairingSession !== completedSession)'));
+		assert.ok(connectSource.includes('sessionConnectionStateRevision === dependencies.getConnectionStateRevision()'));
 		assert.ok(sessionSource.includes('DEFAULT_POLL_INTERVAL_MS = 3_000'));
 		assert.ok(sessionSource.includes('pollInFlight'));
 		assert.ok(extensionSource.includes("let alertsEnabled = false"));
@@ -2355,21 +2361,25 @@ suite('Extension Test Suite', () => {
 		assert.ok(extensionSource.includes('let connectionStateRevision = 0'));
 		assert.ok(extensionSource.includes('createTelegramConnectionStateRefresh'));
 		assert.ok(extensionSource.includes('beginAuthoritativeRefresh'));
-		assert.ok(extensionSource.includes('const refreshRevision = dependencies.beginAuthoritativeRefresh()'));
-		assert.ok(extensionSource.includes('dependencies.getConnectionStateRevision() === refreshRevision'));
+		assert.ok(refreshSource.includes('const refreshRevision = dependencies.beginAuthoritativeRefresh()'));
+		assert.ok(refreshSource.includes('dependencies.getConnectionStateRevision() === refreshRevision'));
 		assert.ok(extensionSource.includes('createTelegramOnboarding'));
 		assert.ok(extensionSource.includes('runTelegramActivationOnboarding'));
-		assert.ok(extensionSource.includes('dependencies.onboarding.maybeShow(dependencies.getConnectionState())'));
-		assert.ok(extensionSource.includes("applySessionConnectionState('connected')"));
-		assert.ok(extensionSource.includes("applySessionConnectionState('disconnected')"));
+		assert.ok(onboardingSource.includes('dependencies.onboarding.maybeShow(dependencies.getConnectionState())'));
+		assert.ok(connectSource.includes("applySessionConnectionState('connected')"));
+		assert.ok(connectSource.includes("applySessionConnectionState('disconnected')"));
 	});
 
 	test('pairing material is not persisted by extension state', () => {
 		const extensionSource = fs.readFileSync(path.resolve(__dirname, '../../src/extension.ts'), 'utf8');
+		const connectSource = fs.readFileSync(path.resolve(__dirname, '../../src/telegram/TelegramConnectCommand.ts'), 'utf8');
+		const refreshSource = fs.readFileSync(path.resolve(__dirname, '../../src/state/TelegramConnectionStateRefresh.ts'), 'utf8');
+		const onboardingSource = fs.readFileSync(path.resolve(__dirname, '../../src/telegram/TelegramOnboarding.ts'), 'utf8');
+		const toggleSource = fs.readFileSync(path.resolve(__dirname, '../../src/telegram/TelegramAlertsToggleCommand.ts'), 'utf8');
 		const secretStoreSource = fs.readFileSync(path.resolve(__dirname, '../../src/state/SecretStore.ts'), 'utf8');
 
-		assert.ok(extensionSource.includes(TELEGRAM_ONBOARDING_SHOWN_KEY));
-		assert.strictEqual(extensionSource.includes('workspaceState'), false);
+		assert.ok(onboardingSource.includes(TELEGRAM_ONBOARDING_SHOWN_KEY));
+		assert.strictEqual([extensionSource, connectSource, refreshSource, onboardingSource, toggleSource].some((source) => source.includes('workspaceState')), false);
 		assert.strictEqual(secretStoreSource.includes('pairing'), false);
 		assert.strictEqual(secretStoreSource.includes('telegramUrl'), false);
 	});
