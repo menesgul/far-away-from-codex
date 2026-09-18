@@ -1,9 +1,22 @@
 import type { Env } from "./env";
 import { enforceRequestBounds, errorResponse, jsonResponse } from "./http";
 import { hashPairingToken } from "./pairings";
+import { TelegramBotClient } from "./telegram/TelegramBotClient";
 import { withTimeout, WORKER_DEPENDENCY_TIMEOUT_MS } from "./timeout";
 
 const START_TOKEN_PATTERN = /^\/start ([A-Za-z0-9_-]{43})$/;
+
+export const TELEGRAM_PAIRING_ACKNOWLEDGEMENT = "\u2705 Connected to Far Away From Codex\n\n"
+  + "This Telegram chat is now connected to your VS Code installation.\n"
+  + "Turn Codex Alerts ON in VS Code to receive alerts here.";
+
+interface TelegramMessageClient {
+  sendMessage(chatId: string | number, text: string): Promise<void>;
+}
+
+export interface TelegramWebhookDependencies {
+  createTelegramBotClient?: (botToken: string) => TelegramMessageClient;
+}
 
 interface TelegramUpdate {
   message?: {
@@ -40,7 +53,11 @@ function privateStart(update: unknown): { token: string; chatId: string } | unde
   return { token: tokenMatch[1], chatId: String(message.chat.id) };
 }
 
-export async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
+export async function handleTelegramWebhook(
+  request: Request,
+  env: Env,
+  dependencies: TelegramWebhookDependencies = {},
+): Promise<Response> {
   if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET) {
     return errorResponse(401, "UNAUTHORIZED", "Webhook authentication failed.");
   }
@@ -95,8 +112,22 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   }
 
   // A non-matching, expired, or replayed token is intentionally acknowledged without detail.
-  if (result[0]?.meta.changes !== 1) {
+  if (result[0]?.meta.changes !== 1 || result[1]?.meta.changes !== 1) {
     return jsonResponse({ ok: true });
+  }
+
+  // D1 has already atomically consumed the pairing and bound the chat. The
+  // acknowledgement is optional UX only: never let transport failure alter
+  // that authoritative outcome or the webhook acknowledgement.
+  try {
+    const createTelegramBotClient = dependencies.createTelegramBotClient
+      ?? ((botToken: string) => new TelegramBotClient(botToken));
+    await createTelegramBotClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
+      start.chatId,
+      TELEGRAM_PAIRING_ACKNOWLEDGEMENT,
+    );
+  } catch {
+    // Telegram delivery failures are deliberately not surfaced or retried.
   }
 
   return jsonResponse({ ok: true });

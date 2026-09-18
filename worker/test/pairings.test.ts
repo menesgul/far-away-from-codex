@@ -8,6 +8,12 @@ import {
   PAIRING_STATUS_RATE_LIMIT_RETRY_AFTER_SECONDS,
 } from "../src/pairingRateLimit";
 import { PAIRING_TTL_MS, createPairing, hashPairingToken } from "../src/pairings";
+import { TelegramBotClient } from "../src/telegram/TelegramBotClient";
+import {
+  handleTelegramWebhook,
+  TELEGRAM_PAIRING_ACKNOWLEDGEMENT,
+  type TelegramWebhookDependencies,
+} from "../src/telegramWebhook";
 
 const INSTALLATION_CREDENTIAL = "abcdefghijklmnopqrstuvwxyz0123456789_ABCDEF";
 
@@ -105,18 +111,34 @@ function environmentWithPairingConnectionLookup(
   };
 }
 
-async function webhook(token: string, chatId = 123456789, type = "private"): Promise<Response> {
-  return worker.fetch(
-    new Request("https://worker.example/v1/telegram/webhook", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Telegram-Bot-Api-Secret-Token": env.TELEGRAM_WEBHOOK_SECRET,
-      },
-      body: JSON.stringify({ message: { text: `/start ${token}`, chat: { id: chatId, type } } }),
-    }),
-    testEnv(),
-  );
+function webhookRequest(token: string, chatId = 123456789, type = "private"): Request {
+  return new Request("https://worker.example/v1/telegram/webhook", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Telegram-Bot-Api-Secret-Token": env.TELEGRAM_WEBHOOK_SECRET,
+    },
+    body: JSON.stringify({ message: { text: `/start ${token}`, chat: { id: chatId, type } } }),
+  });
+}
+
+async function webhook(
+  token: string,
+  chatId = 123456789,
+  type = "private",
+  dependencies: TelegramWebhookDependencies = {},
+): Promise<Response> {
+  return handleTelegramWebhook(webhookRequest(token, chatId, type), testEnv(), dependencies);
+}
+
+function successfulTelegramResponse(): Response {
+  return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), { status: 200 });
+}
+
+function telegramClientWithFetch(request: typeof fetch): TelegramWebhookDependencies {
+  return {
+    createTelegramBotClient: (botToken) => new TelegramBotClient(botToken, { fetch: request }),
+  };
 }
 
 describe("Telegram pairing", () => {
@@ -386,10 +408,12 @@ describe("Telegram pairing", () => {
     expect(otherResponse.status).toBe(404);
   });
 
-  it("accepts only an authenticated, exact private-chat start and consumes the token once", async () => {
+  it("binds an exact private-chat start and sends one Connected acknowledgement", async () => {
     const installation = await createInstallation();
     const pairing = await (await requestPairing()).json<PairingResponse>();
     const token = tokenFrom(pairing);
+    const telegramRequest = vi.fn(async () => successfulTelegramResponse()) as unknown as typeof fetch;
+    const dependencies = telegramClientWithFetch(telegramRequest);
 
     const unauthenticated = await worker.fetch(
       new Request("https://worker.example/v1/telegram/webhook", {
@@ -400,20 +424,20 @@ describe("Telegram pairing", () => {
     );
     expect(unauthenticated.status).toBe(401);
 
-    expect((await webhook(token, 777, "group")).status).toBe(200);
+    expect((await webhook(token, 777, "group", dependencies)).status).toBe(200);
     let installationRow = await env.DB.prepare("SELECT telegram_chat_id FROM installations WHERE id = ?")
       .bind(installation.id)
       .first<{ telegram_chat_id: string | null }>();
     expect(installationRow?.telegram_chat_id).toBeNull();
 
-    const connected = await webhook(token, 777);
+    const connected = await webhook(token, 777, "private", dependencies);
     expect(connected.status).toBe(200);
     installationRow = await env.DB.prepare("SELECT telegram_chat_id FROM installations WHERE id = ?")
       .bind(installation.id)
       .first<{ telegram_chat_id: string | null }>();
     expect(installationRow?.telegram_chat_id).toBe("777");
 
-    expect((await webhook(token, 888)).status).toBe(200);
+    expect((await webhook(token, 888, "private", dependencies)).status).toBe(200);
     installationRow = await env.DB.prepare("SELECT telegram_chat_id FROM installations WHERE id = ?")
       .bind(installation.id)
       .first<{ telegram_chat_id: string | null }>();
@@ -426,22 +450,134 @@ describe("Telegram pairing", () => {
       testEnv(),
     );
     expect(await status.json()).toEqual({ status: "connected" });
+
+    expect(telegramRequest).toHaveBeenCalledTimes(1);
+    const [, init] = (telegramRequest as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(JSON.parse(init.body as string)).toEqual({
+      chat_id: "777",
+      text: "\u2705 Connected to Far Away From Codex\n\n"
+        + "This Telegram chat is now connected to your VS Code installation.\n"
+        + "Turn Codex Alerts ON in VS Code to receive alerts here.",
+    });
+    expect(TELEGRAM_PAIRING_ACKNOWLEDGEMENT).toBe((JSON.parse(init.body as string) as { text: string }).text);
   });
 
-  it("never rebinds a replay that arrives in the same millisecond as consumption", async () => {
+  it("sends no duplicate acknowledgement for a replay", async () => {
+    await createInstallation();
+    const pairing = await (await requestPairing()).json<PairingResponse>();
+    const token = tokenFrom(pairing);
+    const telegramRequest = vi.fn(async () => successfulTelegramResponse()) as unknown as typeof fetch;
+    const dependencies = telegramClientWithFetch(telegramRequest);
+
+    expect((await webhook(token, 777, "private", dependencies)).status).toBe(200);
+    expect((await webhook(token, 888, "private", dependencies)).status).toBe(200);
+
+    expect(telegramRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("never rebinds or acknowledges a replay that arrives in the same millisecond as consumption", async () => {
     const installation = await createInstallation();
     const pairing = await (await requestPairing()).json<PairingResponse>();
     const token = tokenFrom(pairing);
     const consumedAt = 1_700_000_000_000;
+    const telegramRequest = vi.fn(async () => successfulTelegramResponse()) as unknown as typeof fetch;
     vi.spyOn(Date, "now").mockReturnValue(consumedAt);
 
-    expect((await webhook(token, 777)).status).toBe(200);
-    expect((await webhook(token, 888)).status).toBe(200);
+    const responses = await Promise.all([
+      webhook(token, 777, "private", telegramClientWithFetch(telegramRequest)),
+      webhook(token, 888, "private", telegramClientWithFetch(telegramRequest)),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
 
     const installationRow = await env.DB.prepare("SELECT telegram_chat_id FROM installations WHERE id = ?")
       .bind(installation.id)
       .first<{ telegram_chat_id: string | null }>();
     expect(installationRow?.telegram_chat_id).toBe("777");
+    expect(telegramRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not acknowledge wrong, expired, or group-chat starts", async () => {
+    await createInstallation();
+    const pairing = await (await requestPairing()).json<PairingResponse>();
+    const telegramRequest = vi.fn(async () => successfulTelegramResponse()) as unknown as typeof fetch;
+    const dependencies = telegramClientWithFetch(telegramRequest);
+
+    expect((await webhook("A".repeat(43), 555, "private", dependencies)).status).toBe(200);
+    expect((await webhook(tokenFrom(pairing), 555, "group", dependencies)).status).toBe(200);
+    await env.DB.prepare("UPDATE pairings SET expires_at = ? WHERE id = ?")
+      .bind(Date.now() - 1, pairing.pairingId)
+      .run();
+    expect((await webhook(tokenFrom(pairing), 555, "private", dependencies)).status).toBe(200);
+
+    expect(telegramRequest).not.toHaveBeenCalled();
+  });
+
+  it("keeps the pairing connected when the acknowledgement fails without retrying", async () => {
+    const installation = await createInstallation();
+    const pairing = await (await requestPairing()).json<PairingResponse>();
+    const sensitiveTelegramDetail = "telegram-sensitive-response-detail";
+    const telegramRequest = vi.fn(async () => Promise.reject(new Error(sensitiveTelegramDetail))) as unknown as typeof fetch;
+
+    const response = await webhook(
+      tokenFrom(pairing),
+      555,
+      "private",
+      telegramClientWithFetch(telegramRequest),
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toBe(JSON.stringify({ ok: true }));
+    expect(body).not.toContain(sensitiveTelegramDetail);
+    expect(telegramRequest).toHaveBeenCalledTimes(1);
+    expect(
+      await env.DB.prepare("SELECT telegram_chat_id FROM installations WHERE id = ?")
+        .bind(installation.id)
+        .first<{ telegram_chat_id: string | null }>(),
+    ).toEqual({ telegram_chat_id: "555" });
+    expect(
+      await worker.fetch(
+        new Request(`https://worker.example/v1/pairings/${pairing.pairingId}`, {
+          headers: authenticatedHeaders(),
+        }),
+        testEnv(),
+      ).then((status) => status.json()),
+    ).toEqual({ status: "connected" });
+  });
+
+  it("preserves malformed and unsupported-update handling without acknowledgement", async () => {
+    const telegramRequest = vi.fn(async () => successfulTelegramResponse()) as unknown as typeof fetch;
+    const dependencies = telegramClientWithFetch(telegramRequest);
+
+    const malformed = await handleTelegramWebhook(
+      new Request("https://worker.example/v1/telegram/webhook", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": env.TELEGRAM_WEBHOOK_SECRET },
+        body: "not-json",
+      }),
+      testEnv(),
+      dependencies,
+    );
+    const unsupported = await handleTelegramWebhook(
+      new Request("https://worker.example/v1/telegram/webhook", {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": env.TELEGRAM_WEBHOOK_SECRET },
+        body: JSON.stringify({ callback_query: { id: "update-id" } }),
+      }),
+      testEnv(),
+      dependencies,
+    );
+
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({
+      error: { code: "INVALID_TELEGRAM_UPDATE", message: "Telegram update is invalid." },
+    });
+    expect(unsupported.status).toBe(200);
+    expect(await unsupported.json()).toEqual({ ok: true });
+    expect(telegramRequest).not.toHaveBeenCalled();
   });
 
   it("does not bind expired pairings and disconnect preserves the credential while invalidating pending pairings", async () => {
