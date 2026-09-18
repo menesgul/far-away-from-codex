@@ -7,10 +7,13 @@ import {
   pairingStatusRateLimitOptions,
   telegramConnectionRateLimitOptions,
 } from "./pairingRateLimit";
+import { TelegramBotClient } from "./telegram/TelegramBotClient";
 import { withTimeout, WORKER_DEPENDENCY_TIMEOUT_MS } from "./timeout";
 
 export const PAIRING_TOKEN_BYTES = 32;
 export const PAIRING_TTL_MS = 5 * 60 * 1_000;
+export const TELEGRAM_DISCONNECT_ACKNOWLEDGEMENT = "\u{1F50C} Disconnected from Far Away From Codex\n\n"
+  + "This chat will no longer receive Codex alerts from that VS Code installation.";
 
 interface PairingStatusRow {
   expires_at: number;
@@ -281,23 +284,91 @@ export async function disconnectTelegram(request: Request, env: Env): Promise<Re
     return errorResponse(401, "UNAUTHORIZED", "Installation authentication failed.");
   }
 
+  let installation: TelegramConnectionRow | null;
   try {
-    await withTimeout(
-      env.DB.batch([
-        env.DB
-          .prepare("UPDATE installations SET telegram_chat_id = NULL WHERE id = ? AND revoked_at IS NULL")
-          .bind(authentication.installation.id),
-        env.DB.prepare("DELETE FROM pairings WHERE installation_id = ? AND used_at IS NULL")
-          .bind(authentication.installation.id),
-      ]),
-      WORKER_DEPENDENCY_TIMEOUT_MS,
-    );
+    installation = await getActiveInstallationTelegramConnection(env.DB, authentication.installation.id);
   } catch {
     return errorResponse(
       503,
       "TELEGRAM_DISCONNECT_UNAVAILABLE",
       "Telegram disconnect is temporarily unavailable.",
     );
+  }
+
+  // A revocation after authentication is not a successful disconnect.
+  if (installation === null) {
+    return errorResponse(401, "UNAUTHORIZED", "Installation authentication failed.");
+  }
+
+  const oldChatId = installation.telegram_chat_id;
+  let disconnected = false;
+  try {
+    const result = await withTimeout(
+      env.DB.batch([
+        env.DB
+          .prepare(
+            "UPDATE installations SET telegram_chat_id = NULL "
+              + "WHERE id = ? AND revoked_at IS NULL AND telegram_chat_id = ?",
+          )
+          .bind(authentication.installation.id, oldChatId),
+        env.DB
+          .prepare(
+            "DELETE FROM pairings WHERE installation_id = ? AND used_at IS NULL "
+              + "AND EXISTS (SELECT 1 FROM installations "
+              + "WHERE id = ? AND revoked_at IS NULL AND telegram_chat_id IS NULL)",
+          )
+          .bind(authentication.installation.id, authentication.installation.id),
+      ]),
+      WORKER_DEPENDENCY_TIMEOUT_MS,
+    );
+    disconnected = oldChatId !== null && result[0]?.meta.changes === 1;
+  } catch {
+    return errorResponse(
+      503,
+      "TELEGRAM_DISCONNECT_UNAVAILABLE",
+      "Telegram disconnect is temporarily unavailable.",
+    );
+  }
+
+  if (oldChatId !== null && !disconnected) {
+    let currentInstallation: TelegramConnectionRow | null;
+    try {
+      currentInstallation = await getActiveInstallationTelegramConnection(
+        env.DB,
+        authentication.installation.id,
+      );
+    } catch {
+      return errorResponse(
+        503,
+        "TELEGRAM_DISCONNECT_UNAVAILABLE",
+        "Telegram disconnect is temporarily unavailable.",
+      );
+    }
+
+    if (currentInstallation === null) {
+      return errorResponse(401, "UNAUTHORIZED", "Installation authentication failed.");
+    }
+
+    if (currentInstallation.telegram_chat_id !== null) {
+      return errorResponse(
+        409,
+        "TELEGRAM_CONNECTION_CHANGED",
+        "Telegram connection changed. Please try again.",
+      );
+    }
+  }
+
+  if (disconnected) {
+    // The D1 transition and pairing invalidation are authoritative. This is a
+    // single optional UX acknowledgement; delivery failure must not affect DELETE.
+    try {
+      await new TelegramBotClient(env.TELEGRAM_BOT_TOKEN).sendMessage(
+        oldChatId!,
+        TELEGRAM_DISCONNECT_ACKNOWLEDGEMENT,
+      );
+    } catch {
+      // Telegram delivery failures are deliberately not surfaced or retried.
+    }
   }
 
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
