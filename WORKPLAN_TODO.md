@@ -2,269 +2,398 @@
 
 > **Current milestone:** M0 — Repository & Runtime Foundation
 >
-> **Current step:** M0.2 — Introduce npm Workspace Root
+> **Current step:** M0.3 — Move Existing Apps Without Behavior Change
 >
-> Implement **only this step**. Do not begin M0.3 or any later work.
+> Implement **only this step**. Do not begin M0.4 or any later work.
 
 ## Why this step exists
 
-M0.1 froze the pre-migration regression contract. M0.2 now introduces the package-manager/tooling foundation needed for the repository to become a monorepo, while deliberately leaving the existing VS Code extension and Cloud Worker in their current locations.
+M0.2 established one npm workspace/install graph while the repository root still temporarily doubled as the VS Code extension package. M0.3 removes that transitional ownership ambiguity.
 
-This is a **workspace/tooling migration only**. Source relocation belongs to M0.3.
+This step physically isolates the two existing applications:
 
-The repository must remain behaviorally equivalent after this step.
+```text
+existing root VS Code extension  → apps/vscode
+worker/                          → apps/cloud
+repository root                  → orchestration-only workspace root
+```
 
-## Starting state
+This is a **mechanical application-boundary migration**. It must not change production behavior, runtime authority, Telegram semantics, authentication, or product capabilities.
 
-M0.1 is reviewed and complete.
+M0.3 deliberately comes before domain/contracts/adapter packages and before Companion creation so structural-move regressions remain attributable to this move alone.
 
-Current repository shape:
+## Verified starting state
+
+Starting branch: `planning/m0-foundation`.
+
+M0.2 reviewed result:
+
+- root is currently `private: true`;
+- transitional npm workspaces = `["worker"]`;
+- root is still the VS Code extension manifest/package;
+- `worker/` is the Cloudflare Worker workspace;
+- one canonical root `package-lock.json` exists;
+- `worker/package-lock.json` is gone;
+- root Node baseline is `>=22`;
+- `tsconfig.base.json` contains only shared `strict` and ES2022 target invariants;
+- extension retains Node16 semantics;
+- Worker retains ESNext/Bundler/Cloudflare semantics;
+- final M0.2 gate = extension compile/lint + **92 tests**, Worker typecheck + **73 tests across 6 files**, aggregate `npm run validate` PASS;
+- no production source changed in M0.2.
+
+Expected starting HEAD after the reviewed M0.2 commit:
+
+`c8987f08821bfe241b8bd933b881aaf625df3e11`
+
+If the local checkout does not contain the reviewed M0.2 result or has unrelated uncommitted changes, stop and report before moving files.
+
+## Target shape for this slice
+
+M0.3 should end with:
 
 ```text
 far-away-from-codex/
-├── src/                    # VS Code extension implementation/tests
-├── worker/                 # Cloudflare Worker package
-│   ├── package.json
-│   ├── package-lock.json
-│   ├── tsconfig.json
-│   ├── vitest.config.ts
-│   └── ...
-├── package.json            # currently both repo root and VS Code extension manifest
-├── package-lock.json
-├── tsconfig.json
-├── eslint.config.mjs
-└── .vscode-test.mjs
+├── apps/
+│   ├── vscode/
+│   │   ├── src/
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   ├── .vscode-test.mjs
+│   │   └── extension packaging/support files as required
+│   └── cloud/
+│       ├── src/
+│       ├── test/
+│       ├── migrations/
+│       ├── package.json
+│       ├── tsconfig.json
+│       ├── vitest.config.ts
+│       ├── wrangler.jsonc
+│       └── existing Cloud support files
+├── package.json             # orchestration-only private workspace root
+├── package-lock.json        # sole canonical lockfile
+├── tsconfig.base.json
+├── eslint.config.mjs        # may remain root-shared if behaviorally clean
+├── ARCHITECTURE.md
+├── WORKPLAN.md
+└── WORKPLAN_TODO.md
 ```
 
-Important current facts:
+Do **not** create `apps/companion` or any `packages/*` directory in this slice.
 
-- root package is still the VS Code extension package;
-- `worker/` is a separate npm package;
-- both currently use TypeScript 6.x;
-- root extension compilation uses Node16 module semantics;
-- Worker uses ESNext + Bundler module semantics and Cloudflare-specific types/tooling;
-- M0.1 baseline is 92 passing VS Code tests plus green compile/lint;
-- M0.1 baseline is 73 passing Worker tests across 6 files plus green Worker typecheck;
-- there are currently two package lockfiles;
-- no `apps/`, `packages/`, Companion, IPC, or canonical-domain packages exist yet.
+## Ownership decision
 
-## M0.2 design decision
+After M0.3, the repository root is **not a VS Code extension package**.
 
-Use **npm workspaces**. Do not introduce pnpm, Yarn, Nx, Turborepo, or another monorepo orchestrator.
+The extension package owns its own:
 
-For this transitional slice, the repository root may remain both:
+- VS Code manifest fields;
+- extension name/version/displayName/description;
+- `engines.vscode`;
+- `activationEvents`;
+- `main`;
+- `contributes`;
+- runtime dependency `qrcode`;
+- extension-specific dev dependencies/scripts needed to compile, lint, test, watch, and package;
+- extension source/tests and extension-specific test/packaging configuration.
 
-1. the existing VS Code extension package, and
-2. the npm workspace root.
+The Cloud application owns its existing Worker package metadata, Wrangler/Vitest configuration, D1 migrations, tests, source, and Cloud-specific support files.
 
-That temporary dual role is intentional. It avoids moving `src/` before M0.3 while still establishing a single root install graph.
+The root owns only repository-wide concerns:
 
-The only existing child workspace in M0.2 is:
+- `private: true`;
+- npm workspace membership;
+- Node/toolchain baseline;
+- orchestration scripts;
+- canonical root lockfile;
+- shared TypeScript/ESLint configuration where genuinely shared;
+- architecture/workplan/docs.
+
+Do not leave VS Code manifest fields at root merely for convenience.
+
+## Workspace contract
+
+Change workspace membership from transitional `worker/` to the actual application packages:
 
 ```text
-worker/
+apps/vscode
+apps/cloud
 ```
 
-Do **not** create placeholder `apps/*` or `packages/*` directories merely to match the final architecture.
+Use explicit workspace paths in this slice. Do not add speculative `packages/*` globs before M0.4 creates those packages.
 
-M0.3 will move the existing application packages into their final `apps/vscode` and `apps/cloud` locations and finish separating the repository root from the VS Code package.
+Keep one canonical root `package-lock.json`. There must be no nested application lockfiles.
 
-## Package-manager contract
+Regenerate/update the root lock only as required to reflect package relocation. Preserve the M0.2 resolved dependency versions and declared dependency ranges. A physical workspace path change is expected; unrelated dependency churn is not.
 
-The root `package.json` must become the npm workspace authority without changing the extension manifest behavior.
+A fresh root `npm ci --ignore-scripts` must succeed after the move.
 
-Required root metadata:
+## VS Code application move
 
-- keep the current VS Code extension manifest fields intact;
-- add `private: true`;
-- add npm `workspaces` containing the current Worker package path;
-- declare a Node.js baseline compatible with the current toolchain: Node 22.x or newer within the supported major policy chosen by the implementation; do not silently require an older runtime than current Cloudflare tooling supports;
-- do not rename the extension/package/product in this slice.
+Move the existing extension implementation/tests from root `src/` into `apps/vscode/src/` without semantic edits except path/config adjustments required by relocation.
 
-Use the root `package-lock.json` as the canonical workspace lockfile after migration.
+Move or recreate extension-specific configuration beside the extension package where the tool expects package-relative paths, including:
 
-The nested `worker/package-lock.json` must no longer remain a competing install authority once the root workspace lock is successfully generated and verified. Remove it only as part of the verified workspace-lock migration, not before.
+- extension `package.json`;
+- extension `tsconfig.json`;
+- `.vscode-test.mjs`;
+- `.vscodeignore` if required for package behavior;
+- extension-specific packaging metadata/files required by the current extension workflow.
 
-Do not perform dependency upgrades merely because `npm install` produces a newer compatible transitive resolution. Prefer preserving the existing declared dependency ranges and observed behavior. Any unavoidable lockfile resolution change must be inspectable in the diff and must not be accompanied by unrelated package-version edits.
+Do not rewrite `src/extension.ts`, `BackendClient`, Telegram commands/state/UI, or SecretStore for the future Companion architecture. Their current ownership is legacy and intentionally survives this slice. Ownership changes come later.
 
-## Root orchestration contract
+The extension must still expose exactly the same current commands/activation behavior and compile to its package-local output directory.
 
-Add explicit root commands that make the repository operable from one entry point.
+## Cloud application move
 
-At minimum provide root-level orchestration for:
+Move the existing `worker/` application as a unit to `apps/cloud/`.
+
+Preserve:
+
+- Worker package name/version;
+- `src/`;
+- `test/`;
+- `migrations/`;
+- `wrangler.jsonc`;
+- `vitest.config.ts`;
+- `tsconfig.json`;
+- `.dev.vars.example`;
+- package-local README/gitignore/support files.
+
+Update only paths that became invalid because the package moved.
+
+Wrangler must still target the same application entry point relative to the Cloud package. Vitest must still load the same Wrangler config, test bindings, and D1 migrations. No D1 schema or production route behavior may change.
+
+## Root orchestration
+
+Rewrite root scripts so they orchestrate the relocated workspaces rather than treating root as the extension package.
+
+Required root gates:
 
 - extension compile;
 - extension lint;
 - extension tests;
-- Worker typecheck;
-- Worker tests;
-- an aggregate validation command suitable for migration gates.
+- Cloud typecheck;
+- Cloud tests;
+- aggregate `validate`.
 
-Prefer clear scripts over shell-specific command chains. They must work on Windows, since the current development baseline is Windows/PowerShell.
+The aggregate gate must remain side-effect free: no `dev`, `deploy`, D1 remote mutation, or other external action.
 
-Do not make `dev` or `deploy` part of aggregate validation. Deployment must never happen as a side effect of build/test/typecheck.
+Prefer npm workspace targeting rather than shell `cd` chains.
 
-Preserve the existing extension commands required by VS Code tooling, including `vscode:prepublish`, `compile`, `watch`, `lint`, and `test`, unless an exact behavior-preserving alias is needed.
+Keep the reproducible pinned VS Code test runtime behavior established in M0.2 unless relocation gives a proven reason to change it.
 
-Worker `dev`, `deploy`, `typecheck`, and `test` remain package-local responsibilities and must still be runnable through npm workspace targeting.
+## Structure-coupled tests and path repair
 
-## TypeScript configuration
-
-Create `tsconfig.base.json` only for **genuinely shared compiler invariants**.
-
-It must not force runtime-specific module semantics across applications.
+M0.1 explicitly identified structure coupling that must be handled in this slice.
 
 In particular:
 
-- VS Code extension may retain Node16 module semantics;
-- Cloud Worker must retain its ESNext/Bundler/Cloudflare semantics;
-- Cloudflare-specific types must not leak into the root/extension configuration;
-- VS Code-specific types must not leak into the Worker configuration;
-- no future Companion assumptions should be encoded yet.
+- `src/test/extension.test.ts` currently assumes the root extension manifest and fixed root `src/` paths;
+- `.vscode-test.mjs` currently discovers `out/test/**/*.test.js`;
+- extension `tsconfig.json` currently assumes root `src`/`out`;
+- Worker Vitest config assumes package-relative Wrangler/migration paths;
+- Worker test environment declarations may assume the old Worker path.
 
-If extending the base config would cause semantic churn in this slice, keep package configs explicit and make the base intentionally minimal. The existence of a base config is not a reason to rewrite working compiler settings.
+After relocation, repair these assumptions to their **new package-local equivalents**.
 
-## ESLint/tooling boundary
+For the four structure-coupled extension tests, preserve the intent of each assertion one-for-one. Relocating an assertion is allowed; deleting or weakening it is not.
 
-Keep the existing root ESLint configuration functional for the current extension.
+Ordinary relative imports that remain correct after moving a whole source tree should not be rewritten gratuitously.
 
-Do not attempt the final multi-package lint architecture in M0.2 unless required for the aggregate validation gate.
+## Root/shared config boundaries
 
-The Worker currently has no lint script. Do not invent a Worker lint migration solely to increase symmetry; M0.1 froze Worker typecheck + tests as its current gate.
+Keep `tsconfig.base.json` at root. Update child `extends` paths for their new depth while preserving effective compiler semantics exactly:
+
+- VS Code: Node16 semantics + existing Node/Mocha/DOM/VS Code environment;
+- Cloud: ESNext + Bundler + Cloudflare/Vitest environment.
+
+Use `tsc --showConfig` or equivalent comparison to verify no semantic drift beyond path/output relocation.
+
+`eslint.config.mjs` may remain at root as shared tooling. Ensure extension lint targets the relocated extension source and produces the same result.
+
+Do not invent a Cloud lint gate; M0.1/M0.2 froze Cloud typecheck + tests as the current contract.
+
+## Repository-support files
+
+Classify root support files before moving them.
+
+Rules:
+
+- architecture/workplan files remain root;
+- root project README/LICENSE may remain repository-level unless the extension tool demonstrably requires package-local copies;
+- extension-specific files belong under `apps/vscode`;
+- Cloud-specific files move with `apps/cloud`;
+- root development/editor configuration may remain root if it is repository-wide, but any paths inside it must be repaired if they reference the old layout.
+
+Do not perform unrelated README/product-documentation cleanup in M0.3.
 
 ## Tasks
 
-- [ ] Verify M0.1 is marked complete in `WORKPLAN.md` before changing repository tooling.
-- [ ] Confirm the working tree is clean and record the starting HEAD in Completion Evidence.
-- [ ] Add npm workspace metadata to the existing root package without changing VS Code extension manifest behavior.
-- [ ] Register `worker/` as the transitional child workspace.
-- [ ] Add the root Node engine/toolchain baseline needed by the current workspace.
-- [ ] Generate and inspect a canonical root workspace `package-lock.json`.
-- [ ] Remove `worker/package-lock.json` only after the root lockfile demonstrably represents the Worker workspace and a fresh root install succeeds.
-- [ ] Add/normalize root scripts for extension compile/lint/test, Worker typecheck/test, and aggregate validation.
-- [ ] Ensure Worker `dev` and `deploy` remain explicit opt-in commands and are not transitively invoked by validation.
-- [ ] Add a minimal `tsconfig.base.json` for safe shared invariants without changing package-specific module/runtime semantics.
-- [ ] Update existing TypeScript configs to extend the base only where this is behaviorally neutral; otherwise document why a config remains explicit.
-- [ ] Run a clean/fresh root dependency installation using the workspace lockfile.
-- [ ] Verify npm recognizes the Worker as a workspace from the root.
-- [ ] Run the extension compile and lint gates.
-- [ ] Run the extension test suite using the reproducible M0.1-compatible VS Code runtime if the default runner again encounters the known runtime-download issue.
-- [ ] Run Worker typecheck through the workspace/root orchestration.
-- [ ] Run all Worker tests through the workspace/root orchestration.
-- [ ] Run the aggregate root validation command.
-- [ ] Inspect the final diff for accidental dependency upgrades, manifest changes, source moves, or production behavior changes.
-- [ ] Record exact commands/results, lockfile outcome, test counts, and any environment-only runner issue under Completion Evidence.
+- [ ] Verify M0.2 is marked complete in `WORKPLAN.md`.
+- [ ] Confirm starting HEAD and a clean working tree.
+- [ ] Inventory root files that are extension-owned versus repository-owned before moving them.
+- [ ] Create only `apps/vscode` and `apps/cloud`.
+- [ ] Move the current extension `src/` tree to `apps/vscode/src/` preserving history/content.
+- [ ] Move the extension manifest/package metadata and required package-local test/build/packaging config to `apps/vscode/`.
+- [ ] Move the existing `worker/` application to `apps/cloud/` as a unit.
+- [ ] Convert root `package.json` into an orchestration-only private workspace package.
+- [ ] Set root workspaces explicitly to `apps/vscode` and `apps/cloud`.
+- [ ] Preserve application package names, versions, declared dependency ranges, VS Code manifest behavior, and Cloud package behavior.
+- [ ] Update root orchestration scripts to target relocated workspaces.
+- [ ] Update the canonical root lockfile for the new workspace paths without unrelated resolution churn.
+- [ ] Verify there are no nested application lockfiles.
+- [ ] Repair extension TypeScript/config/test-discovery paths for package-local operation.
+- [ ] Repair Cloud TypeScript/Vitest/Wrangler/migration/test paths only where relocation requires it.
+- [ ] Repair all four M0.1 structure-coupled extension assertions one-for-one for the new layout.
+- [ ] Inspect root `.vscode/`, ignore files, packaging files, and other path-bearing support config for relocation breakage.
+- [ ] Verify effective TypeScript runtime/module/type semantics remain unchanged.
+- [ ] Run a fresh root `npm ci --ignore-scripts`.
+- [ ] Verify npm recognizes both `apps/vscode` and `apps/cloud` as workspaces.
+- [ ] Run extension compile.
+- [ ] Run extension lint.
+- [ ] Run extension tests and retain **92 passing**.
+- [ ] Run Cloud typecheck.
+- [ ] Run Cloud tests and retain **73 passing across 6 files**.
+- [ ] Run root aggregate `npm run validate`.
+- [ ] Audit the final diff for semantic production-code edits versus pure moves/path repairs.
+- [ ] Confirm old root `src/` and old `worker/` no longer remain as competing application locations.
+- [ ] Confirm no `apps/companion` or `packages/*` work began.
+- [ ] Record exact moves, config repairs, commands/results, test counts, lockfile review, and any deviations under Completion Evidence.
 
 ## Required regression gate
 
-M0.2 is accepted only if all M0.1 behavior remains protected:
+M0.3 must preserve the complete M0.1/M0.2 behavioral contract:
 
-- VS Code extension compile: PASS;
-- VS Code extension lint: PASS;
-- VS Code extension tests: **92 passing**;
-- Worker typecheck: PASS;
-- Worker tests: **73 passing across 6 files**;
-- test counts do not decrease silently;
-- installation/authentication/revocation behavior remains unchanged;
-- Telegram pairing TTL/hash/one-time/race/private-chat/webhook behavior remains unchanged;
-- Telegram lookup/disconnect/concurrent-rebind behavior remains unchanged;
-- extension QR/open-copy-cancel/session/onboarding/secret-storage behavior remains unchanged;
-- bounded HTTP and Telegram client semantics remain unchanged.
+- extension compile: PASS;
+- extension lint: PASS;
+- extension tests: **92 passing**;
+- Cloud typecheck: PASS;
+- Cloud tests: **73 passing across 6 files**;
+- aggregate root validation: PASS;
+- no silent test-count decrease;
+- installation registration/authentication/revocation semantics unchanged;
+- pairing TTL/hash/single-use/race/private-chat/webhook semantics unchanged;
+- Telegram connection lookup/disconnect/concurrent-rebind semantics unchanged;
+- QR/open-copy-cancel/pairing-session/onboarding/secret-storage semantics unchanged;
+- bounded HTTP/Telegram client behavior unchanged.
 
-The known M0.1 VS Code test-runtime download/contention issue is an environment/runner issue, not permission to skip the extension suite. Use the already-compatible/pinned runtime approach when necessary and record it.
+Moved production files should be byte-for-byte identical wherever path changes do not require an edit. Any production-source edit requires an explicit relocation necessity and must be called out in Completion Evidence.
 
 ## Acceptance criteria
 
-M0.2 is complete only when:
+M0.3 is complete only when:
 
-- [ ] root npm workspace metadata is valid;
-- [ ] `worker/` is recognized as a workspace;
-- [ ] one canonical root workspace lockfile can reproduce dependencies from the repository root;
-- [ ] there is no competing Worker lockfile after successful lock consolidation;
-- [ ] a fresh root install succeeds;
-- [ ] root scripts can invoke the required extension and Worker validation gates;
-- [ ] aggregate validation is side-effect free and never deploys;
-- [ ] TypeScript runtime-specific semantics remain isolated;
-- [ ] all M0.1 regression gates pass with the same test counts;
-- [ ] no source file has been moved;
-- [ ] no production behavior has changed;
-- [ ] no M0.3 directory migration has started.
+- [ ] root is orchestration-only and no longer contains the VS Code extension manifest;
+- [ ] `apps/vscode` is a valid npm workspace containing the existing extension;
+- [ ] `apps/cloud` is a valid npm workspace containing the existing Worker;
+- [ ] root workspaces contain exactly the application packages introduced in this slice;
+- [ ] one canonical root lockfile installs both applications;
+- [ ] no nested lockfile competes with root;
+- [ ] fresh root install succeeds;
+- [ ] extension manifest/commands/activation/runtime behavior are unchanged;
+- [ ] Cloud Wrangler/Vitest/D1 behavior is unchanged;
+- [ ] effective TypeScript runtime semantics are unchanged;
+- [ ] all 92 extension tests pass;
+- [ ] all 73 Cloud tests across 6 files pass;
+- [ ] root aggregate validation passes;
+- [ ] the four known structure-coupled assertions have one-for-one preserved intent;
+- [ ] old root `src/` and `worker/` application locations are gone;
+- [ ] no production capability or authority migration occurred;
+- [ ] M0.4 has not started.
 
-## Expected file-scope
+## Expected change shape
 
-Expected changes are primarily:
+Large rename/move noise is expected.
+
+Expected categories:
 
 ```text
-package.json
-package-lock.json
-tsconfig.base.json
-tsconfig.json                 # only if safe base extension is useful
-worker/package-lock.json      # expected deletion after verified consolidation
-worker/tsconfig.json          # only if safe base extension is useful
-WORKPLAN_TODO.md              # Completion Evidence only after execution
+src/**                         → apps/vscode/src/**
+worker/**                      → apps/cloud/**
+package.json                   → orchestration-only root manifest
+apps/vscode/package.json       → extension manifest/package
+package-lock.json              → workspace path updates
+tsconfig.json                  → moved/replaced by apps/vscode/tsconfig.json
+.vscode-test.mjs               → apps/vscode/.vscode-test.mjs
+.vscodeignore                  → apps/vscode/.vscodeignore if package-owned
+apps/cloud/tsconfig.json       → extends ../../tsconfig.base.json
+apps/vscode/tsconfig.json      → extends ../../tsconfig.base.json
+root scripts/config paths      → relocation repairs
+WORKPLAN_TODO.md               → Completion Evidence only after execution
 ```
 
-A change outside this set requires a concrete M0.2 tooling reason. Production files under `src/` or `worker/src/` should not need modification.
+The final diff should predominantly be Git renames plus configuration/path changes, not logic rewrites.
 
 ## Do not
 
-During M0.2:
+During M0.3:
 
-- do not create `apps/vscode`;
-- do not create `apps/cloud`;
+- do not create Companion;
 - do not create `apps/companion`;
-- do not create `packages/domain`, `packages/contracts`, or `packages/agent-adapter-sdk`;
-- do not move `src/`;
-- do not move `worker/`;
-- do not rewrite imports merely for future paths;
-- do not implement Companion;
-- do not introduce IPC;
-- do not introduce SQLite;
-- do not introduce agent discovery/observation/resolution;
+- do not create `packages/domain`;
+- do not create `packages/contracts`;
+- do not create `packages/agent-adapter-sdk`;
+- do not introduce IPC or SQLite;
+- do not migrate BackendClient/SecretStore authority to Companion yet;
 - do not change Telegram behavior;
-- do not rewrite installation/authentication;
-- do not add generic agent commands;
-- do not rename the product;
-- do not perform unrelated dependency upgrades;
-- do not weaken or delete tests to make the migration pass;
-- do not begin M0.3.
+- do not change D1 schema/routes;
+- do not rewrite authentication;
+- do not implement P-256/OAuth;
+- do not add agent adapters or ACP;
+- do not add routing/escalation/policy/inbox logic;
+- do not rename existing commands/product identifiers;
+- do not upgrade dependencies merely because files moved;
+- do not delete/skip/weaken regression tests;
+- do not perform unrelated code cleanup/refactoring;
+- do not begin M0.4.
 
 ## Stop conditions
 
-Stop and report instead of improvising if:
+Stop and report rather than improvising if:
 
-- npm cannot represent the transitional root-extension + child-Worker workspace without changing extension runtime/package semantics;
-- lockfile consolidation requires unexplained dependency/version churn;
-- a baseline regression test fails because of the workspace migration;
-- TypeScript base inheritance changes emitted/runtime semantics;
-- a production source change appears necessary;
-- M0.2 would require moving `src/` or `worker/`.
+- moving the extension requires a production behavior change rather than a path/config repair;
+- moving the Cloud app changes Wrangler/D1 runtime semantics;
+- npm lock regeneration introduces unexplained dependency-version churn;
+- extension test intent cannot be preserved after relocation;
+- the baseline test counts cannot be reproduced;
+- a root support file has ambiguous ownership and moving/duplicating it would alter packaging behavior;
+- the move appears to require creating domain/contracts/Companion abstractions early.
 
-An architecture/tooling conflict is evidence to review, not permission to silently expand scope.
+A structural inconvenience is not permission to pull M0.4+ work into this slice.
 
 ## Completion Evidence
 
-**Status:** EXECUTED — REGRESSION GATE PASS; AWAITING REVIEW
+**Status:** NOT STARTED
 
-- starting commit: `029e06285cc5096efd8ded042b9879e2430b6333`; `git status --short` was empty before tooling changes.
-- npm/Node versions: npm `10.9.2`; Node.js `v22.17.1`. Root `engines.node` is `>=22`; the existing `engines.vscode` remains `^1.137.0`.
-- workspace metadata: root is `private: true` with `workspaces: ["worker"]`; the existing root extension name/version/product and Worker name/version are unchanged.
-- canonical lockfile result: root `package-lock.json` is lockfile v3 and contains the `worker` package plus the `node_modules/far-away-from-codex-worker -> worker` workspace link. A plain fresh `npm ci --ignore-scripts` reproduced the unified install successfully.
-- nested Worker lockfile result: `worker/package-lock.json` was removed only after the unified root lock represented the Worker, the first fresh root install passed, and npm reported the linked workspace with its expected dependency versions. A second clean install and aggregate validation then passed with the nested lockfile absent.
-- files changed: `package.json`, `package-lock.json`, `tsconfig.base.json`, `tsconfig.json`, `worker/tsconfig.json`, deletion of `worker/package-lock.json`, and this M0.2 Completion Evidence section. No other plan section was changed.
-- root commands added/changed: added `extension:compile`, `extension:lint`, pinned `extension:test`, `worker:typecheck`, `worker:test`, and `validate`. Existing `vscode:prepublish`, `compile`, `watch`, `pretest`, `lint`, and `test` remain. `validate` invokes only compile/lint/tests/typecheck; it does not invoke Worker `dev` or `deploy`.
-- clean install command/result: after removing only the verified repository-local root and Worker `node_modules` directories, `npm ci --ignore-scripts` passed (`345 packages added`, `347 packages audited`). After deleting `worker/package-lock.json`, the same command passed again from the root lock alone with the same package/audit counts. npm reported 6 existing dependency audit findings (1 low, 3 moderate, 2 high); no audit-fix or dependency upgrade was performed.
-- workspace recognition command/result: `npm ls --workspaces --depth=0` passed and reported `far-away-from-codex-worker@0.0.1 -> .\\worker` with `@cloudflare/vitest-plugin@1.1.9`, `@cloudflare/workers-types@5.20260915.1`, `typescript@6.0.3`, `vitest@4.1.11`, and `wrangler@4.131.2`. `npm pkg get name version --workspaces` also reported the Worker workspace.
-- extension compile result: `npm run extension:compile` passed.
-- extension lint result: `npm run extension:lint` passed.
-- extension test result/count: `npm run extension:test` passed against cached VS Code `1.137.0`; **92 passing**.
-- Worker typecheck result: `npm run worker:typecheck` passed.
-- Worker test result/count: `npm run worker:test` passed; **73 passing across 6 files**.
-- aggregate validation result: `npm run validate` passed end-to-end both before and after the final root-lock-only clean install; **92 extension tests** and **73 Worker tests across 6 files** passed in the final aggregate run.
-- dependency/lockfile review: declared dependency ranges are unchanged. All 264 pre-existing root package resolutions remain present with zero version mismatches. Of the 161 baseline Worker package entries, 80 remain represented with zero version mismatches and 81 omitted entries are all optional non-host binary packages; zero non-optional entries are missing. Worker direct tool versions remain exactly at their baseline resolutions. `git diff --check` passed apart from Git's existing LF-to-CRLF working-copy warnings.
-- production/source changes: none. `git status --short -- src worker/src apps packages` was empty; no source was moved, no production file changed, and no M0.3 directory was created.
-- deviations or environment issues: the first npm 10.9.2 lock-only solve hit npm's internal `Cannot read properties of null (reading 'edgesOut')` peer-resolution error. Lock generation therefore used `--legacy-peer-deps` and a `2026-09-18` registry cutoff to preserve the two baseline lockfiles' resolutions; the final plain `npm ci --ignore-scripts` did not require that flag. The default VS Code runner attempted an unnecessary 1.140.0 download, so the new orchestration command pins the already-compatible cached 1.137.0 runtime. Electron/Vite child-process launches required running outside the filesystem sandbox after initial `spawn EPERM` startup failures. Worker tests emitted the expected missing local Telegram secret warnings but passed.
-- final regression-gate result: **PASS** — extension compile/lint passed; extension tests remained 92; Worker typecheck passed; Worker tests remained 73 across 6 files; aggregate validation passed.
-- notes: `tsconfig.base.json` contains only the already-shared `strict: true` and `target: ES2022` invariants. `tsc --showConfig` confirmed the extension still uses Node16 semantics with Node/Mocha/DOM types and the Worker still uses ESNext/Bundler semantics with Cloudflare/Vitest types. M0.2 remains unmarked in `WORKPLAN.md` pending review.
+When M0.3 is executed, replace this section with:
 
-Do not mark M0.2 complete in `WORKPLAN.md` until this evidence has been reviewed.
+- starting commit:
+- files/directories moved:
+- root files retained and why:
+- extension package location/manifest result:
+- Cloud package location/result:
+- workspace metadata:
+- canonical lockfile result:
+- nested lockfiles:
+- root orchestration changes:
+- extension config/path repairs:
+- Cloud config/path repairs:
+- structure-coupled test repairs:
+- TypeScript effective-config comparison:
+- clean install result:
+- workspace recognition result:
+- extension compile result:
+- extension lint result:
+- extension test result/count:
+- Cloud typecheck result:
+- Cloud test result/count:
+- aggregate validation result:
+- dependency/lockfile review:
+- production source diff audit:
+- old-location cleanup result:
+- M0.4+ scope audit:
+- deviations/environment issues:
+- final regression-gate result:
+- notes:
+
+Do not mark M0.3 complete in `WORKPLAN.md` until this evidence has been reviewed.
