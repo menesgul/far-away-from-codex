@@ -156,7 +156,7 @@ far-away/
 
 Only one step is expanded in `WORKPLAN_TODO.md` at a time.
 
-- [ ] **M0.1 — Freeze Baseline & Regression Contract**
+- [x] **M0.1 — Freeze Baseline & Regression Contract**
 - [ ] **M0.2 — Introduce npm Workspace Root**
 - [ ] **M0.3 — Move Existing Apps Without Behavior Change**
 - [ ] **M0.4 — Introduce Domain / Contracts / Adapter SDK Boundaries**
