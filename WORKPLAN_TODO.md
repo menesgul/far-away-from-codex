@@ -244,29 +244,27 @@ An architecture/tooling conflict is evidence to review, not permission to silent
 
 ## Completion Evidence
 
-**Status:** NOT STARTED
+**Status:** EXECUTED — REGRESSION GATE PASS; AWAITING REVIEW
 
-When M0.2 is executed, replace this section with:
-
-- starting commit:
-- npm/Node versions:
-- workspace metadata:
-- canonical lockfile result:
-- nested Worker lockfile result:
-- files changed:
-- root commands added/changed:
-- clean install command/result:
-- workspace recognition command/result:
-- extension compile result:
-- extension lint result:
-- extension test result/count:
-- Worker typecheck result:
-- Worker test result/count:
-- aggregate validation result:
-- dependency/lockfile review:
-- production/source changes:
-- deviations or environment issues:
-- final regression-gate result:
-- notes:
+- starting commit: `029e06285cc5096efd8ded042b9879e2430b6333`; `git status --short` was empty before tooling changes.
+- npm/Node versions: npm `10.9.2`; Node.js `v22.17.1`. Root `engines.node` is `>=22`; the existing `engines.vscode` remains `^1.137.0`.
+- workspace metadata: root is `private: true` with `workspaces: ["worker"]`; the existing root extension name/version/product and Worker name/version are unchanged.
+- canonical lockfile result: root `package-lock.json` is lockfile v3 and contains the `worker` package plus the `node_modules/far-away-from-codex-worker -> worker` workspace link. A plain fresh `npm ci --ignore-scripts` reproduced the unified install successfully.
+- nested Worker lockfile result: `worker/package-lock.json` was removed only after the unified root lock represented the Worker, the first fresh root install passed, and npm reported the linked workspace with its expected dependency versions. A second clean install and aggregate validation then passed with the nested lockfile absent.
+- files changed: `package.json`, `package-lock.json`, `tsconfig.base.json`, `tsconfig.json`, `worker/tsconfig.json`, deletion of `worker/package-lock.json`, and this M0.2 Completion Evidence section. No other plan section was changed.
+- root commands added/changed: added `extension:compile`, `extension:lint`, pinned `extension:test`, `worker:typecheck`, `worker:test`, and `validate`. Existing `vscode:prepublish`, `compile`, `watch`, `pretest`, `lint`, and `test` remain. `validate` invokes only compile/lint/tests/typecheck; it does not invoke Worker `dev` or `deploy`.
+- clean install command/result: after removing only the verified repository-local root and Worker `node_modules` directories, `npm ci --ignore-scripts` passed (`345 packages added`, `347 packages audited`). After deleting `worker/package-lock.json`, the same command passed again from the root lock alone with the same package/audit counts. npm reported 6 existing dependency audit findings (1 low, 3 moderate, 2 high); no audit-fix or dependency upgrade was performed.
+- workspace recognition command/result: `npm ls --workspaces --depth=0` passed and reported `far-away-from-codex-worker@0.0.1 -> .\\worker` with `@cloudflare/vitest-plugin@1.1.9`, `@cloudflare/workers-types@5.20260915.1`, `typescript@6.0.3`, `vitest@4.1.11`, and `wrangler@4.131.2`. `npm pkg get name version --workspaces` also reported the Worker workspace.
+- extension compile result: `npm run extension:compile` passed.
+- extension lint result: `npm run extension:lint` passed.
+- extension test result/count: `npm run extension:test` passed against cached VS Code `1.137.0`; **92 passing**.
+- Worker typecheck result: `npm run worker:typecheck` passed.
+- Worker test result/count: `npm run worker:test` passed; **73 passing across 6 files**.
+- aggregate validation result: `npm run validate` passed end-to-end both before and after the final root-lock-only clean install; **92 extension tests** and **73 Worker tests across 6 files** passed in the final aggregate run.
+- dependency/lockfile review: declared dependency ranges are unchanged. All 264 pre-existing root package resolutions remain present with zero version mismatches. Of the 161 baseline Worker package entries, 80 remain represented with zero version mismatches and 81 omitted entries are all optional non-host binary packages; zero non-optional entries are missing. Worker direct tool versions remain exactly at their baseline resolutions. `git diff --check` passed apart from Git's existing LF-to-CRLF working-copy warnings.
+- production/source changes: none. `git status --short -- src worker/src apps packages` was empty; no source was moved, no production file changed, and no M0.3 directory was created.
+- deviations or environment issues: the first npm 10.9.2 lock-only solve hit npm's internal `Cannot read properties of null (reading 'edgesOut')` peer-resolution error. Lock generation therefore used `--legacy-peer-deps` and a `2026-09-18` registry cutoff to preserve the two baseline lockfiles' resolutions; the final plain `npm ci --ignore-scripts` did not require that flag. The default VS Code runner attempted an unnecessary 1.140.0 download, so the new orchestration command pins the already-compatible cached 1.137.0 runtime. Electron/Vite child-process launches required running outside the filesystem sandbox after initial `spawn EPERM` startup failures. Worker tests emitted the expected missing local Telegram secret warnings but passed.
+- final regression-gate result: **PASS** — extension compile/lint passed; extension tests remained 92; Worker typecheck passed; Worker tests remained 73 across 6 files; aggregate validation passed.
+- notes: `tsconfig.base.json` contains only the already-shared `strict: true` and `target: ES2022` invariants. `tsc --showConfig` confirmed the extension still uses Node16 semantics with Node/Mocha/DOM types and the Worker still uses ESNext/Bundler semantics with Cloudflare/Vitest types. M0.2 remains unmarked in `WORKPLAN.md` pending review.
 
 Do not mark M0.2 complete in `WORKPLAN.md` until this evidence has been reviewed.

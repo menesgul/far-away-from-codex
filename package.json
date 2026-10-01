@@ -3,7 +3,12 @@
   "displayName": "Far Away From Codex",
   "description": "Get Telegram alerts when Codex finishes, fails, or needs your approval while you're away from VS Code.",
   "version": "0.0.1",
+  "private": true,
+  "workspaces": [
+    "worker"
+  ],
   "engines": {
+    "node": ">=22",
     "vscode": "^1.137.0"
   },
   "categories": [
@@ -39,7 +44,13 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "extension:compile": "npm run compile",
+    "extension:lint": "npm run lint",
+    "extension:test": "vscode-test --code-version 1.137.0",
+    "worker:typecheck": "npm run typecheck --workspace=far-away-from-codex-worker",
+    "worker:test": "npm run test --workspace=far-away-from-codex-worker",
+    "validate": "npm run extension:compile && npm run extension:lint && npm run extension:test && npm run worker:typecheck && npm run worker:test"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
