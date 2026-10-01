@@ -2,123 +2,271 @@
 
 > **Current milestone:** M0 — Repository & Runtime Foundation
 >
-> **Current step:** M0.1 — Freeze Baseline & Regression Contract
+> **Current step:** M0.2 — Introduce npm Workspace Root
 >
-> Implement **only this step**. Do not begin M0.2 or any later work.
+> Implement **only this step**. Do not begin M0.3 or any later work.
 
 ## Why this step exists
 
-M0 will move package boundaries and later introduce a standalone Companion. Before changing repository layout or runtime ownership, establish a reproducible pre-migration behavioral baseline so later failures can be classified as:
-- pre-existing,
-- structural-migration regression,
-- or new-runtime regression.
+M0.1 froze the pre-migration regression contract. M0.2 now introduces the package-manager/tooling foundation needed for the repository to become a monorepo, while deliberately leaving the existing VS Code extension and Cloud Worker in their current locations.
 
-This step changes planning/baseline evidence only. It must not perform the repository migration itself.
+This is a **workspace/tooling migration only**. Source relocation belongs to M0.3.
 
-## Locked baseline
+The repository must remain behaviorally equivalent after this step.
 
-Git baseline for M0:
+## Starting state
 
-`e5e6fab28983cba22cc2f5506eaf6e0f9270b54d`
+M0.1 is reviewed and complete.
 
-Expected baseline shape:
-- root = VS Code extension npm package;
-- `src/` = extension implementation and tests;
-- `worker/` = Cloudflare Worker npm project and tests;
-- Telegram pairing/connect/disconnect foundation exists;
-- no standalone Companion exists.
+Current repository shape:
 
-If the working branch no longer matches this assumption, stop and report the divergence rather than rewriting the baseline.
+```text
+far-away-from-codex/
+├── src/                    # VS Code extension implementation/tests
+├── worker/                 # Cloudflare Worker package
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── tsconfig.json
+│   ├── vitest.config.ts
+│   └── ...
+├── package.json            # currently both repo root and VS Code extension manifest
+├── package-lock.json
+├── tsconfig.json
+├── eslint.config.mjs
+└── .vscode-test.mjs
+```
+
+Important current facts:
+
+- root package is still the VS Code extension package;
+- `worker/` is a separate npm package;
+- both currently use TypeScript 6.x;
+- root extension compilation uses Node16 module semantics;
+- Worker uses ESNext + Bundler module semantics and Cloudflare-specific types/tooling;
+- M0.1 baseline is 92 passing VS Code tests plus green compile/lint;
+- M0.1 baseline is 73 passing Worker tests across 6 files plus green Worker typecheck;
+- there are currently two package lockfiles;
+- no `apps/`, `packages/`, Companion, IPC, or canonical-domain packages exist yet.
+
+## M0.2 design decision
+
+Use **npm workspaces**. Do not introduce pnpm, Yarn, Nx, Turborepo, or another monorepo orchestrator.
+
+For this transitional slice, the repository root may remain both:
+
+1. the existing VS Code extension package, and
+2. the npm workspace root.
+
+That temporary dual role is intentional. It avoids moving `src/` before M0.3 while still establishing a single root install graph.
+
+The only existing child workspace in M0.2 is:
+
+```text
+worker/
+```
+
+Do **not** create placeholder `apps/*` or `packages/*` directories merely to match the final architecture.
+
+M0.3 will move the existing application packages into their final `apps/vscode` and `apps/cloud` locations and finish separating the repository root from the VS Code package.
+
+## Package-manager contract
+
+The root `package.json` must become the npm workspace authority without changing the extension manifest behavior.
+
+Required root metadata:
+
+- keep the current VS Code extension manifest fields intact;
+- add `private: true`;
+- add npm `workspaces` containing the current Worker package path;
+- declare a Node.js baseline compatible with the current toolchain: Node 22.x or newer within the supported major policy chosen by the implementation; do not silently require an older runtime than current Cloudflare tooling supports;
+- do not rename the extension/package/product in this slice.
+
+Use the root `package-lock.json` as the canonical workspace lockfile after migration.
+
+The nested `worker/package-lock.json` must no longer remain a competing install authority once the root workspace lock is successfully generated and verified. Remove it only as part of the verified workspace-lock migration, not before.
+
+Do not perform dependency upgrades merely because `npm install` produces a newer compatible transitive resolution. Prefer preserving the existing declared dependency ranges and observed behavior. Any unavoidable lockfile resolution change must be inspectable in the diff and must not be accompanied by unrelated package-version edits.
+
+## Root orchestration contract
+
+Add explicit root commands that make the repository operable from one entry point.
+
+At minimum provide root-level orchestration for:
+
+- extension compile;
+- extension lint;
+- extension tests;
+- Worker typecheck;
+- Worker tests;
+- an aggregate validation command suitable for migration gates.
+
+Prefer clear scripts over shell-specific command chains. They must work on Windows, since the current development baseline is Windows/PowerShell.
+
+Do not make `dev` or `deploy` part of aggregate validation. Deployment must never happen as a side effect of build/test/typecheck.
+
+Preserve the existing extension commands required by VS Code tooling, including `vscode:prepublish`, `compile`, `watch`, `lint`, and `test`, unless an exact behavior-preserving alias is needed.
+
+Worker `dev`, `deploy`, `typecheck`, and `test` remain package-local responsibilities and must still be runnable through npm workspace targeting.
+
+## TypeScript configuration
+
+Create `tsconfig.base.json` only for **genuinely shared compiler invariants**.
+
+It must not force runtime-specific module semantics across applications.
+
+In particular:
+
+- VS Code extension may retain Node16 module semantics;
+- Cloud Worker must retain its ESNext/Bundler/Cloudflare semantics;
+- Cloudflare-specific types must not leak into the root/extension configuration;
+- VS Code-specific types must not leak into the Worker configuration;
+- no future Companion assumptions should be encoded yet.
+
+If extending the base config would cause semantic churn in this slice, keep package configs explicit and make the base intentionally minimal. The existence of a base config is not a reason to rewrite working compiler settings.
+
+## ESLint/tooling boundary
+
+Keep the existing root ESLint configuration functional for the current extension.
+
+Do not attempt the final multi-package lint architecture in M0.2 unless required for the aggregate validation gate.
+
+The Worker currently has no lint script. Do not invent a Worker lint migration solely to increase symmetry; M0.1 froze Worker typecheck + tests as its current gate.
 
 ## Tasks
 
-- [ ] Record the exact baseline commit SHA used for the migration.
-- [ ] Inventory the current root VS Code build, lint, compile, and test commands from repository configuration.
-- [ ] Inventory the current Worker build/test commands and Cloudflare test configuration.
-- [ ] Run or otherwise verify the existing VS Code extension test suite from the baseline environment.
-- [ ] Run or otherwise verify the existing Worker test suite from the baseline environment.
-- [ ] Record test counts/results and any pre-existing failures separately for root and Worker.
-- [ ] Identify the tests that protect Telegram pairing creation/expiry/single-use/race behavior.
-- [ ] Identify the tests that protect Telegram connection lookup and disconnect behavior.
-- [ ] Identify the tests that protect installation registration/authentication/revocation behavior.
-- [ ] Identify extension-side tests protecting QR/onboarding/pairing-session/connect/disconnect behavior.
-- [ ] Identify tests whose assertions are coupled to current file paths/package layout rather than user-visible behavior.
-- [ ] Classify each migration-critical test group as **behavioral regression contract**, **security regression contract**, or **structure-coupled test**.
-- [ ] Record any behavior that is currently implemented but insufficiently covered and would be at risk during M0.2/M0.3.
-- [ ] Define the explicit regression gate that M0.2 and M0.3 must preserve.
-- [ ] Produce a concise M0.1 completion record in this file under `Completion Evidence`.
+- [ ] Verify M0.1 is marked complete in `WORKPLAN.md` before changing repository tooling.
+- [ ] Confirm the working tree is clean and record the starting HEAD in Completion Evidence.
+- [ ] Add npm workspace metadata to the existing root package without changing VS Code extension manifest behavior.
+- [ ] Register `worker/` as the transitional child workspace.
+- [ ] Add the root Node engine/toolchain baseline needed by the current workspace.
+- [ ] Generate and inspect a canonical root workspace `package-lock.json`.
+- [ ] Remove `worker/package-lock.json` only after the root lockfile demonstrably represents the Worker workspace and a fresh root install succeeds.
+- [ ] Add/normalize root scripts for extension compile/lint/test, Worker typecheck/test, and aggregate validation.
+- [ ] Ensure Worker `dev` and `deploy` remain explicit opt-in commands and are not transitively invoked by validation.
+- [ ] Add a minimal `tsconfig.base.json` for safe shared invariants without changing package-specific module/runtime semantics.
+- [ ] Update existing TypeScript configs to extend the base only where this is behaviorally neutral; otherwise document why a config remains explicit.
+- [ ] Run a clean/fresh root dependency installation using the workspace lockfile.
+- [ ] Verify npm recognizes the Worker as a workspace from the root.
+- [ ] Run the extension compile and lint gates.
+- [ ] Run the extension test suite using the reproducible M0.1-compatible VS Code runtime if the default runner again encounters the known runtime-download issue.
+- [ ] Run Worker typecheck through the workspace/root orchestration.
+- [ ] Run all Worker tests through the workspace/root orchestration.
+- [ ] Run the aggregate root validation command.
+- [ ] Inspect the final diff for accidental dependency upgrades, manifest changes, source moves, or production behavior changes.
+- [ ] Record exact commands/results, lockfile outcome, test counts, and any environment-only runner issue under Completion Evidence.
 
-## Regression contract to freeze
+## Required regression gate
 
-At minimum, preserve the current behavior represented by:
-- installation registration and credential validation;
-- pairing token generation and expiry;
-- one-time pairing consumption;
-- concurrent/racing pairing safety;
-- private Telegram chat binding rules;
-- Telegram webhook secret validation;
-- Telegram connection lookup semantics;
-- disconnect idempotency/rebind safety/concurrent-delete behavior;
-- extension QR-first connect flow;
-- explicit open/copy/cancel pairing UX where currently covered;
-- extension pairing polling/session behavior;
-- onboarding behavior where currently covered;
-- secret-storage behavior where currently covered;
-- bounded HTTP/Telegram client behavior and timeout/error handling where currently covered.
+M0.2 is accepted only if all M0.1 behavior remains protected:
 
-This list freezes existing useful behavior for migration safety. It does **not** promote the old anonymous bearer identity model, extension-owned cloud state, or `telegram_chat_id` installation schema into target architecture.
+- VS Code extension compile: PASS;
+- VS Code extension lint: PASS;
+- VS Code extension tests: **92 passing**;
+- Worker typecheck: PASS;
+- Worker tests: **73 passing across 6 files**;
+- test counts do not decrease silently;
+- installation/authentication/revocation behavior remains unchanged;
+- Telegram pairing TTL/hash/one-time/race/private-chat/webhook behavior remains unchanged;
+- Telegram lookup/disconnect/concurrent-rebind behavior remains unchanged;
+- extension QR/open-copy-cancel/session/onboarding/secret-storage behavior remains unchanged;
+- bounded HTTP and Telegram client semantics remain unchanged.
+
+The known M0.1 VS Code test-runtime download/contention issue is an environment/runner issue, not permission to skip the extension suite. Use the already-compatible/pinned runtime approach when necessary and record it.
 
 ## Acceptance criteria
 
-M0.1 is complete only when:
+M0.2 is complete only when:
 
-- [ ] baseline SHA is explicit and reproducible;
-- [ ] root and Worker test commands are known;
-- [ ] baseline test results are recorded;
-- [ ] any pre-existing failures are explicitly separated from migration regressions;
-- [ ] migration-critical Telegram/security behavior is mapped to concrete tests;
-- [ ] structure-coupled tests are identified before paths are moved;
-- [ ] known coverage gaps relevant to M0.2/M0.3 are recorded;
-- [ ] an explicit regression gate exists for the next structural steps;
-- [ ] no repository/package/runtime migration has been performed.
+- [ ] root npm workspace metadata is valid;
+- [ ] `worker/` is recognized as a workspace;
+- [ ] one canonical root workspace lockfile can reproduce dependencies from the repository root;
+- [ ] there is no competing Worker lockfile after successful lock consolidation;
+- [ ] a fresh root install succeeds;
+- [ ] root scripts can invoke the required extension and Worker validation gates;
+- [ ] aggregate validation is side-effect free and never deploys;
+- [ ] TypeScript runtime-specific semantics remain isolated;
+- [ ] all M0.1 regression gates pass with the same test counts;
+- [ ] no source file has been moved;
+- [ ] no production behavior has changed;
+- [ ] no M0.3 directory migration has started.
+
+## Expected file-scope
+
+Expected changes are primarily:
+
+```text
+package.json
+package-lock.json
+tsconfig.base.json
+tsconfig.json                 # only if safe base extension is useful
+worker/package-lock.json      # expected deletion after verified consolidation
+worker/tsconfig.json          # only if safe base extension is useful
+WORKPLAN_TODO.md              # Completion Evidence only after execution
+```
+
+A change outside this set requires a concrete M0.2 tooling reason. Production files under `src/` or `worker/src/` should not need modification.
 
 ## Do not
 
-During M0.1:
-- do not create `apps/` or `packages/`;
+During M0.2:
+
+- do not create `apps/vscode`;
+- do not create `apps/cloud`;
+- do not create `apps/companion`;
+- do not create `packages/domain`, `packages/contracts`, or `packages/agent-adapter-sdk`;
 - do not move `src/`;
 - do not move `worker/`;
-- do not create Companion;
+- do not rewrite imports merely for future paths;
+- do not implement Companion;
 - do not introduce IPC;
 - do not introduce SQLite;
-- do not rewrite authentication;
+- do not introduce agent discovery/observation/resolution;
 - do not change Telegram behavior;
-- do not rename product/runtime concepts in code;
-- do not implement an agent adapter;
-- do not modify production behavior merely to make a test easier to classify.
+- do not rewrite installation/authentication;
+- do not add generic agent commands;
+- do not rename the product;
+- do not perform unrelated dependency upgrades;
+- do not weaken or delete tests to make the migration pass;
+- do not begin M0.3.
 
-If a baseline test is broken, record it first. Fixing it is a separate explicitly approved action unless the failure prevents establishing the baseline at all.
+## Stop conditions
+
+Stop and report instead of improvising if:
+
+- npm cannot represent the transitional root-extension + child-Worker workspace without changing extension runtime/package semantics;
+- lockfile consolidation requires unexplained dependency/version churn;
+- a baseline regression test fails because of the workspace migration;
+- TypeScript base inheritance changes emitted/runtime semantics;
+- a production source change appears necessary;
+- M0.2 would require moving `src/` or `worker/`.
+
+An architecture/tooling conflict is evidence to review, not permission to silently expand scope.
 
 ## Completion Evidence
 
-**Status:** EXECUTED; AWAITING REVIEW
+**Status:** NOT STARTED
 
-- baseline commit: `e5e6fab28983cba22cc2f5506eaf6e0f9270b54d`. It is an ancestor of the execution commit `7369ea3dcbf79e5719193cb4325737e0e8538bcf`; the three intervening commits change only `ARCHITECTURE.md`, `WORKPLAN.md`, and `WORKPLAN_TODO.md`. The working tree was clean before evidence was recorded, and the expected root `src/` plus `worker/` baseline shape remains intact.
-- environment/tool versions relevant to reproducibility: Windows x64; Node.js `v22.17.1`; npm `10.9.2`; Git `2.47.1.windows.1`; TypeScript `6.0.3`; ESLint `10.10.0`; `@vscode/test-cli` `0.0.15`; existing VS Code Electron test runtime `1.138.0` (compatible with the extension's `^1.137.0` engine); Vitest `4.1.11`; Wrangler declared/installed as `4.131.2`.
-- root command inventory: `npm run vscode:prepublish` -> `npm run compile`; `npm run compile` -> `tsc -p ./` (compile/typecheck plus emit); `npm run lint` -> `eslint src`; `npm test` -> pretest `npm run compile && npm run lint`, then `vscode-test`; `npm run watch` -> `tsc -watch -p ./`. There is no separate root `build` or `typecheck` script.
-- root commands executed: `npm test` reached successful compile and lint, then attempted to resolve/download VS Code `1.140.0`; a duplicate attempt contended on the same download and was stopped. The reproducible suite execution was completed with the already-installed compatible runtime via `npx vscode-test --code-version 1.138.0` after the same compile and lint gate had passed.
-- root test result: PASS — `92 passing` across 11 suites; compile PASS; lint PASS. The Electron runner exited `0`.
-- Worker command/config inventory: `npm run typecheck` -> `tsc --noEmit`; `npm test` -> `vitest run`; `npm run dev` -> `wrangler dev`; `npm run deploy` -> `wrangler deploy`. There is no separate Worker build or lint script. `worker/vitest.config.ts` uses `@cloudflare/vitest-plugin`, loads `worker/wrangler.jsonc`, injects test Telegram bindings, reads D1 migrations from `worker/migrations`, and applies them through `worker/test/apply-migrations.ts`. Wrangler targets `worker/src/index.ts`, compatibility date `2026-09-15`, D1, three rate-limit bindings, and required Telegram secrets.
-- Worker commands executed: from `worker/`, `npm run typecheck` and `npm test`.
-- Worker test result: PASS — typecheck exited `0`; Vitest reported `6 passed` files and `73 passed` tests in `14.41s`. The test runner emitted expected Wrangler warnings that real Telegram secrets were absent; test bindings supplied the test values.
-- pre-existing failures: none in compile, lint, root tests, Worker typecheck, or Worker tests. The default root runner's current-version download contention and sandboxed Electron `spawn EPERM` were environment/runner issues, not test failures; pinning the existing `1.138.0` runtime and allowing Electron launch produced the green result above.
-- migration-critical test map:
-  - **Security regression contract:** `worker/test/installations.test.ts` (14 tests: one-time credential return/hash-only storage, registration failure/rate limits, authentication, revocation, bounded failures, revoke cleanup); `worker/test/pairings.test.ts` (17 tests: five-minute/hash-only creation, expiry, owner-only status, rate limits, authenticated webhook handling, private-chat-only binding, one-time/replay/same-millisecond race safety, connection/revocation races, acknowledgement failure); `worker/test/telegramConnection.test.ts` (15 tests: lookup without chat-ID disclosure, credential/revocation checks, throttling, authoritative disconnect, idempotency, concurrent delete, and rebind safety); `worker/test/telegramBotClient.test.ts` (12 tests: input/response bounds, timeout, safe errors, and no blind retry); the request-bound/configuration checks in `worker/test/routing.test.ts`; `src/test/ui/TelegramPairingPanel.test.ts` (3 tests: local QR, CSP/no token exposure, exact action messages); and `src/test/state/SecretStore.test.ts` (1 test: credential-only secret storage).
-  - **Behavioral regression contract:** `src/test/backend/BackendClient.test.ts` (18 runtime tests: lazy registration, credential reuse/reset, pairing/status/connection/disconnect HTTP contracts and bounded failures); `src/test/state/TelegramConnectionState.test.ts` (6); `src/test/state/TelegramConnectionStateRefresh.test.ts` (5); `src/test/telegram/TelegramAlertsToggleCommand.test.ts` (9); `src/test/telegram/TelegramConnectCommand.test.ts` (14); `src/test/telegram/TelegramDisconnectCommand.test.ts` (12); `src/test/telegram/TelegramOnboarding.test.ts` (12); `src/test/telegram/TelegramPairingSession.test.ts` (8); the visible QR/panel behavior in `src/test/ui/TelegramPairingPanel.test.ts`; `worker/test/routing.test.ts` (12); and `worker/test/d1.test.ts` (3 schema-foundation tests).
-  - **Structure-coupled test:** all 4 tests in `src/test/extension.test.ts` read `../../package.json` and fixed `../../src/...` paths and assert implementation source strings. Their security/behavioral intent remains part of the gate, but the assertions must be deliberately relocated or replaced when M0.3 moves the extension. Other suites use relative source imports; those imports and the `.vscode-test.mjs` `out/test/**/*.test.js`, root `tsconfig.json` `src`/`out`, `worker/vitest.config.ts` config/migration paths, and `worker/test/env.d.ts` main-module path are harness path coupling rather than user-visible assertions.
-- structure-coupled tests: specifically `src/test/extension.test.ts` (4 source/package-layout assertions), plus the test-discovery/configuration paths listed above. No other test was found whose assertion depends on the current repository file location; ordinary relative imports will still require mechanical updates during M0.3.
-- coverage gaps: no end-to-end extension-to-Worker contract test (extension HTTP tests mock responses while Worker routes are tested separately); no test activates the packaged extension and invokes the contributed commands/status bar/webview through real VS Code registration (the four extension tests inspect source text); webhook authentication covers a missing secret but not an explicitly incorrect secret; `SecretStore` uses a fake `SecretStorage` rather than VS Code persistence; and there is no fresh-install/package smoke test or Worker lint/build-only gate. These are gaps to protect manually or add in an explicitly authorized later slice, not reasons to change behavior in M0.1.
-- regression gate: M0.2 and M0.3 must keep root compile and lint green, retain all 92 root behavioral/security assertions (with an explicit one-to-one replacement for any relocated structure-coupled assertion), keep Worker typecheck green, and retain all 73 Worker assertions. Test counts must not decrease silently. The installation/authentication/revocation, pairing TTL/hash/one-time/race/private-chat/webhook, lookup/disconnect/concurrent-rebind, QR/open-copy-cancel/session/onboarding/secret-storage, and bounded HTTP/Telegram semantics above must remain unchanged. Runner/config paths may change only as required by the structural move; no production behavior change is authorized.
-- notes: only this `Completion Evidence` section was changed. No `apps/` or `packages/` directories were created, no source or Worker files were moved, no production code/runtime behavior was modified, and M0.1 remains unchecked in `WORKPLAN.md` pending review.
+When M0.2 is executed, replace this section with:
 
-Do not mark M0.1 complete in `WORKPLAN.md` until this evidence has been reviewed.
+- starting commit:
+- npm/Node versions:
+- workspace metadata:
+- canonical lockfile result:
+- nested Worker lockfile result:
+- files changed:
+- root commands added/changed:
+- clean install command/result:
+- workspace recognition command/result:
+- extension compile result:
+- extension lint result:
+- extension test result/count:
+- Worker typecheck result:
+- Worker test result/count:
+- aggregate validation result:
+- dependency/lockfile review:
+- production/source changes:
+- deviations or environment issues:
+- final regression-gate result:
+- notes:
+
+Do not mark M0.2 complete in `WORKPLAN.md` until this evidence has been reviewed.
