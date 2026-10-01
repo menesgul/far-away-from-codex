@@ -363,37 +363,35 @@ A structural inconvenience is not permission to pull M0.4+ work into this slice.
 
 ## Completion Evidence
 
-**Status:** NOT STARTED
+**Status:** EXECUTED — REGRESSION GATE PASS; AWAITING REVIEW
 
-When M0.3 is executed, replace this section with:
-
-- starting commit:
-- files/directories moved:
-- root files retained and why:
-- extension package location/manifest result:
-- Cloud package location/result:
-- workspace metadata:
-- canonical lockfile result:
-- nested lockfiles:
-- root orchestration changes:
-- extension config/path repairs:
-- Cloud config/path repairs:
-- structure-coupled test repairs:
-- TypeScript effective-config comparison:
-- clean install result:
-- workspace recognition result:
-- extension compile result:
-- extension lint result:
-- extension test result/count:
-- Cloud typecheck result:
-- Cloud test result/count:
-- aggregate validation result:
-- dependency/lockfile review:
-- production source diff audit:
-- old-location cleanup result:
-- M0.4+ scope audit:
-- deviations/environment issues:
-- final regression-gate result:
-- notes:
+- starting commit: `000cef534ccd82b8f3009d45ce235af4319878ab` on `planning/m0-foundation`, with reviewed M0.2 commit `c8987f08821bfe241b8bd933b881aaf625df3e11` as its direct parent; working tree was clean and M0.2 was marked complete before execution.
+- files/directories moved: root `src/` → `apps/vscode/src/`; root extension `package.json`, `tsconfig.json`, `.vscode-test.mjs`, `.vscodeignore`, `README.md`, `CHANGELOG.md`, and `vsc-extension-quickstart.md` → `apps/vscode/`; `worker/` → `apps/cloud/` as one application, including source, tests, migrations, Wrangler/Vitest config, package metadata, README, gitignore, and `.dev.vars.example`.
+- root files retained and why: `ARCHITECTURE.md`, `WORKPLAN.md`, and `WORKPLAN_TODO.md` remain planning/architecture truth; `LICENSE` remains repository-level; `tsconfig.base.json` and `eslint.config.mjs` remain shared configuration; `.gitignore` remains repository-wide; `.vscode/` remains repository development configuration and its extension paths were repaired.
+- extension package location/manifest result: `apps/vscode/package.json`; name/version/display name/description, VS Code engine, activation event, main entry, all four contributed commands, `qrcode` range, dev-dependency ranges, and extension scripts are preserved. The repository Node engine moved to the orchestration root as required.
+- Cloud package location/result: `apps/cloud`; package name/version, source, tests, two D1 migrations, Wrangler entry/bindings/migration directory, Vitest bindings/setup/migration loading, and support files are preserved.
+- workspace metadata: root is `far-away-from-codex-workspace`, `private: true`, with explicit workspaces exactly `apps/vscode` and `apps/cloud`; it contains no VS Code display/activation/main/contribution fields or application dependencies.
+- canonical lockfile result: sole root `package-lock.json` migrated from the old root/`worker` workspace paths to `apps/vscode`/`apps/cloud`; both workspace links are present and `npm ci --ignore-scripts` succeeded.
+- nested lockfiles: none outside `node_modules`; `rg --files -uu -g 'package-lock.json' -g '!**/node_modules/**'` returned only root `package-lock.json`.
+- root orchestration changes: root scripts now target workspaces for extension compile/lint/pinned tests and Cloud typecheck/tests; `validate` runs all five gates without dev/deploy/remote mutation. Compatibility aliases `worker:typecheck` and `worker:test` delegate to the Cloud-named gates; root `watch` delegates to the extension workspace for the retained VS Code task.
+- extension config/path repairs: extension `tsconfig.json` now extends `../../tsconfig.base.json`; package-local `src`, `out`, `.vscode-test.mjs`, and `.vscodeignore` behavior remains unchanged; root `.vscode/launch.json` points extension development/output paths at `apps/vscode`; root output visibility settings point at `apps/vscode/out`.
+- Cloud config/path repairs: only `apps/cloud/tsconfig.json` changed, updating `extends` to `../../tsconfig.base.json`; Wrangler and Vitest configuration remained byte-for-byte unchanged because their package-relative paths stayed valid.
+- structure-coupled test repairs: moving the complete extension package preserved every existing `../../package.json` and `../../src/...` lookup as the same package-local relationship, so no assertion rewrite was necessary. `apps/vscode/src/test/extension.test.ts` is byte-for-byte identical to the starting blob (`6ed3a88b99d6dae54a1afd06ea485cdb1da9d0b8`), and all four assertions passed.
+- TypeScript effective-config comparison: pre/post `tsc --showConfig` outputs have identical effective compiler options and file sets apart from the intended package-relative output/exclude location. VS Code remains strict ES2022 + Node16 with Node/Mocha/DOM types and source maps; Cloud remains strict ES2022 + ESNext/Bundler with Cloudflare/Vitest types, `noEmit`, and `skipLibCheck`.
+- clean install result: PASS — fresh root `npm ci --ignore-scripts` added 346 packages and audited 349 packages. npm reported the pre-existing audit total of 6 vulnerabilities (1 low, 3 moderate, 2 high); no audit fix or dependency upgrade was performed.
+- workspace recognition result: PASS — `npm ls --workspaces --depth=0` recognized `far-away-from-codex@0.0.1 -> apps/vscode` and `far-away-from-codex-worker@0.0.1 -> apps/cloud`.
+- extension compile result: PASS — `npm run extension:compile`.
+- extension lint result: PASS — `npm run extension:lint`.
+- extension test result/count: PASS — `npm run extension:test`, pinned to VS Code `1.137.0`, **92 passing**.
+- Cloud typecheck result: PASS — `npm run cloud:typecheck`.
+- Cloud test result/count: PASS — `npm run cloud:test`, **73 passing across 6 files**.
+- aggregate validation result: PASS — `npm run validate` reran extension compile/lint/**92 tests** and Cloud typecheck/**73 tests across 6 files** successfully.
+- dependency/lockfile review: declared dependency ranges are unchanged and a normalized comparison found exactly 346 versioned lock entries before and after with no added, removed, or changed package/version tuple. Lock changes are root/application ownership plus `worker` → `apps/cloud` path relocation and the new `apps/vscode` workspace link; there is no resolution churn.
+- production source diff audit: PASS — Git blob comparison found zero content mismatches across moved extension production source, Cloud production source, and D1 migrations. No production `.ts` or SQL file was edited; changes are mechanical moves and config/path repairs only.
+- old-location cleanup result: root `src/` and `worker/` no longer exist; applications live only at `apps/vscode` and `apps/cloud`.
+- M0.4+ scope audit: `apps/companion` does not exist; `packages/` does not exist; no domain/contracts/adapter SDK, IPC, SQLite, Companion, agent adapter, routing, policy, inbox, authentication, Telegram semantic, or D1 schema work began.
+- deviations/environment issues: no implementation deviation. npm 10.9.2 could not incrementally reconcile the physically relocated pre-move install/lock (`edgesOut` internal error), so generated `node_modules` trees were removed and the lock workspace paths were migrated mechanically; exact version-tuple comparison and the successful clean install verified the result. The sandbox first blocked registry/process spawning, and the VS Code archive download stalled; final gates ran outside the sandbox using the existing ignored pinned 1.137.0 test-runtime cache via a temporary ignored package-local junction, which was removed after verification. Cloud tests emitted the existing missing-local-secret warnings while using their configured test bindings.
+- final regression-gate result: **PASS** — extension compile/lint/**92 tests**, Cloud typecheck/**73 tests across 6 files**, and aggregate validation all passed with no silent count decrease or production behavior change.
+- notes: M0.3 is intentionally not marked complete in `WORKPLAN.md`; this evidence awaits review.
 
 Do not mark M0.3 complete in `WORKPLAN.md` until this evidence has been reviewed.

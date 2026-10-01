@@ -1,73 +1,26 @@
 {
-  "name": "far-away-from-codex",
-  "displayName": "Far Away From Codex",
-  "description": "Get Telegram alerts when Codex finishes, fails, or needs your approval while you're away from VS Code.",
-  "version": "0.0.1",
+  "name": "far-away-from-codex-workspace",
   "private": true,
   "workspaces": [
-    "worker"
+    "apps/vscode",
+    "apps/cloud"
   ],
   "engines": {
-    "node": ">=22",
-    "vscode": "^1.137.0"
-  },
-  "categories": [
-    "Other"
-  ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
-  "main": "./out/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "far-away-from-codex.toggleAlerts",
-        "title": "Codex Alerts: Toggle"
-      },
-      {
-        "command": "far-away-from-codex.testNotification",
-        "title": "Far Away From Codex: Test Notification"
-      },
-      {
-        "command": "far-away-from-codex.connectTelegram",
-        "title": "Far Away From Codex: Connect Telegram"
-      },
-      {
-        "command": "far-away-from-codex.disconnectTelegram",
-        "title": "Far Away From Codex: Disconnect Telegram"
-      }
-    ]
+    "node": ">=22"
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src",
-    "test": "vscode-test",
-    "extension:compile": "npm run compile",
-    "extension:lint": "npm run lint",
-    "extension:test": "vscode-test --code-version 1.137.0",
-    "worker:typecheck": "npm run typecheck --workspace=far-away-from-codex-worker",
-    "worker:test": "npm run test --workspace=far-away-from-codex-worker",
-    "validate": "npm run extension:compile && npm run extension:lint && npm run extension:test && npm run worker:typecheck && npm run worker:test"
-  },
-  "devDependencies": {
-    "@types/mocha": "^10.0.10",
-    "@types/node": "24.x",
-    "@types/qrcode": "^1.5.6",
-    "@types/vscode": "^1.137.0",
-    "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0",
-    "eslint": "^10.5.0",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.61.1"
+    "watch": "npm run watch --workspace=far-away-from-codex",
+    "extension:compile": "npm run compile --workspace=far-away-from-codex",
+    "extension:lint": "npm run lint --workspace=far-away-from-codex",
+    "extension:test": "npm run extension:test --workspace=far-away-from-codex",
+    "cloud:typecheck": "npm run typecheck --workspace=far-away-from-codex-worker",
+    "cloud:test": "npm run test --workspace=far-away-from-codex-worker",
+    "worker:typecheck": "npm run cloud:typecheck",
+    "worker:test": "npm run cloud:test",
+    "validate": "npm run extension:compile && npm run extension:lint && npm run extension:test && npm run cloud:typecheck && npm run cloud:test"
   },
   "overrides": {
     "diff": "^8.0.4",
     "serialize-javascript": "^7.0.6"
-  },
-  "dependencies": {
-    "qrcode": "^1.5.4"
   }
 }
