@@ -159,7 +159,7 @@ Only one step is expanded in `WORKPLAN_TODO.md` at a time.
 - [x] **M0.1 — Freeze Baseline & Regression Contract**
 - [x] **M0.2 — Introduce npm Workspace Root**
 - [x] **M0.3 — Move Existing Apps Without Behavior Change**
-- [ ] **M0.4 — Introduce Domain / Contracts / Adapter SDK Boundaries**
+- [x] **M0.4 — Introduce Domain / Contracts / Adapter SDK Boundaries**
 - [ ] **M0.5 — Create Standalone Companion Runtime**
 - [ ] **M0.6 — Add Companion Paths, SQLite Bootstrap & Single-Instance Ownership**
 - [ ] **M0.7 — Implement Minimal Local IPC Protocol**
