@@ -1,0 +1,25 @@
+flowchart TD
+    S[Candidate agent + topology + version] --> D{Can Far Away discover an already-running normal session?}
+    D -- No --> X1[Experimental or Unsupported]
+    D -- Yes --> O{Documented/stable observation of relevant events?}
+    O -- No --> X2[Experimental or Unsupported]
+    O -- Yes --> L{Can liveness + parallel session identity + restart rediscovery be preserved?}
+    L -- No --> X3[Monitor only or Unsupported]
+    L -- Yes --> R{Safe exact bounded response to active correlated request?}
+    R -- No --> M[MONITOR]
+    R -- Yes --> W{Does mechanism preserve normal workflow and current live authority?}
+    W -- No --> X4[Special topology: Experimental / Monitor]
+    W -- Yes --> I[INTERACTIVE]
+
+    I --> P[Choose mechanism per port]
+    M --> P
+    P --> P1[1 Same live authority]
+    P1 --> P2[2 Workflow preservation]
+    P2 --> P3[3 Documented / stable]
+    P3 --> P4[4 Exact request correlation]
+    P4 --> P5[5 Reconnect semantics]
+    P5 --> P6[6 Security clarity]
+    P6 --> P7[7 Simplicity]
+
+    ACP[ACP is preferred only when it satisfies these constraints; session/list or load/resume alone does not prove live attach]
+    P --- ACP

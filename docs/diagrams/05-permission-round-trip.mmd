@@ -1,0 +1,26 @@
+sequenceDiagram
+    participant S as Source Runtime
+    participant A as AgentAdapter
+    participant C as Local Companion
+    participant CL as Far Away Cloud
+    participant R as Remote Surface
+    participant U as User
+
+    S->>A: permission/input request
+    A->>C: normalized request + SourceRequestRef
+    C->>C: create/update PendingInteraction
+    C->>CL: sanitized actionable projection
+    CL->>R: bounded choices
+    R->>U: WYSIWYA attention
+    U->>R: exact bounded response
+    R->>CL: action intent / authorization
+    CL->>C: exact interaction + response
+    C->>C: revalidate pending + expiry + authority generation + AllowedResponse
+    C->>A: resolve exact SourceRequestRef
+    A->>S: source-native bounded response
+    S-->>A: source result / current state
+    A-->>C: canonical result
+    C->>C: persist result before remote delivery
+    C-->>CL: action.result
+    CL-->>R: canonical result projection
+    R-->>U: resolved / rejected / stale / unknown outcome

@@ -1,0 +1,34 @@
+sequenceDiagram
+    participant C as Local Companion
+    participant CL as Far Away Cloud
+    participant AP as APNs / ActivityKit
+    participant I as Native iOS
+    participant U as User
+
+    C->>CL: sanitized mobile projection
+    CL->>AP: alert / Live Activity update
+    AP->>I: system presentation
+    I->>U: notification / Lock Screen / Dynamic Island
+
+    Note over I,U: Dynamic Island V1 = display/deep-link only
+
+    U->>I: LOW-risk notification action
+    I->>CL: fetch fresh ActionAuthorizationChallenge
+    CL-->>I: exact challenge + current projection
+    I->>U: WYSIWYA
+    alt Approve
+        I->>U: A2 fresh device-owner authentication
+    else exact non-destructive Reject
+        I->>I: A1 unlocked-device gate
+    end
+    I->>I: sign exact response + displayDigest with MobileDevice key
+    I->>I: App Attest assertion where policy requires/supports
+    I->>CL: signed authorization
+    CL->>CL: verify device/incarnation/binding/grant/challenge/signature/attestation
+    CL->>C: exact bounded action
+    C->>C: canonical PendingInteraction + authority + risk revalidation
+    C-->>CL: canonical result
+    CL-->>I: result projection
+    I-->>U: result
+
+    Note over U,C: HIGH / UNCLASSIFIED = A3 local desktop confirmation

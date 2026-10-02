@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant P1 as iPhone A
+    participant P2 as iPhone B
+    participant CL as Cloud
+    participant C as Companion
+    participant S as Source
+
+    P1->>CL: exact APPROVE actionId=A
+    P2->>CL: exact REJECT actionId=B
+    CL->>C: A
+    CL->>C: B
+    C->>C: serialize per session / interaction
+    C->>C: validate A against current PendingInteraction
+    C->>S: resolve APPROVE
+    S-->>C: terminal/current result
+    C->>C: persist canonical result
+    C-->>CL: A = resolved
+    C->>C: validate B
+    C-->>CL: B = already_resolved / stale
+    CL-->>P1: resolved
+    CL-->>P2: current terminal result

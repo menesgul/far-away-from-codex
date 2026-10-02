@@ -1,0 +1,44 @@
+flowchart TB
+    subgraph Desktop[User Desktop / OS account]
+      VS[VS Code Extension]
+      LC[Local Companion<br/>Node.js per-user process]
+      DB[(SQLite WAL)]
+      OSK[OS Secure Store]
+      AG[Agent Runtimes]
+      VS <-->|named pipe / UDS<br/>authenticated IPC| LC
+      LC <--> DB
+      LC <--> OSK
+      LC <--> AG
+    end
+
+    subgraph Cloud[Far Away Cloud]
+      EDGE[Public Edge Worker / Mobile API]
+      DO[Installation Relay Durable Object]
+      CTRL[(Relational control-plane store)]
+      WORK[APNs / delivery workers]
+      EDGE <--> DO
+      EDGE <--> CTRL
+      WORK <--> CTRL
+    end
+
+    LC <-->|outbound authenticated WSS| DO
+
+    subgraph TelegramSide[Telegram]
+      BOT[Telegram Bot API / webhook]
+    end
+    EDGE <--> BOT
+
+    subgraph Apple[Apple]
+      APNS[APNs / ActivityKit]
+    end
+    WORK --> APNS
+
+    subgraph Phone[iPhone]
+      IOS[Far Away iOS App]
+      SYS[Notification / Live Activity / Dynamic Island]
+      KEY[Device protected key + App Attest key]
+      IOS <--> KEY
+      APNS --> SYS
+      SYS <--> IOS
+      IOS <-->|HTTPS Mobile API| EDGE
+    end

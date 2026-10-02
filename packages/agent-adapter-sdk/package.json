@@ -1,0 +1,17 @@
+{
+  "name": "@far-away/agent-adapter-sdk",
+  "version": "0.0.1",
+  "private": true,
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@far-away/domain": "0.0.1"
+  }
+}

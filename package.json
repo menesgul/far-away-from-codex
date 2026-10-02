@@ -3,7 +3,10 @@
   "private": true,
   "workspaces": [
     "apps/vscode",
-    "apps/cloud"
+    "apps/cloud",
+    "packages/domain",
+    "packages/contracts",
+    "packages/agent-adapter-sdk"
   ],
   "engines": {
     "node": ">=22"
@@ -15,9 +18,12 @@
     "extension:test": "npm run extension:test --workspace=far-away-from-codex",
     "cloud:typecheck": "npm run typecheck --workspace=far-away-from-codex-worker",
     "cloud:test": "npm run test --workspace=far-away-from-codex-worker",
+    "domain:typecheck": "npm run typecheck --workspace=@far-away/domain",
+    "contracts:typecheck": "npm run typecheck --workspace=@far-away/contracts",
+    "adapter-sdk:typecheck": "npm run typecheck --workspace=@far-away/agent-adapter-sdk",
     "worker:typecheck": "npm run cloud:typecheck",
     "worker:test": "npm run cloud:test",
-    "validate": "npm run extension:compile && npm run extension:lint && npm run extension:test && npm run cloud:typecheck && npm run cloud:test"
+    "validate": "npm run domain:typecheck && npm run contracts:typecheck && npm run adapter-sdk:typecheck && npm run extension:compile && npm run extension:lint && npm run extension:test && npm run cloud:typecheck && npm run cloud:test"
   },
   "overrides": {
     "diff": "^8.0.4",
