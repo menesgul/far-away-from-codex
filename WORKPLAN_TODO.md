@@ -255,24 +255,24 @@ Any NO/unclear answer is a review finding.
 
 M0.6 is complete only when:
 
-- [ ] platform-aware per-user Companion data paths are deterministic and tested;
-- [ ] tests do not touch the real user data directory;
-- [ ] exactly one live Companion can own a selected data root;
-- [ ] a competing Companion fails closed and never reaches READY;
-- [ ] stale dead-owner state can be safely reclaimed without time-based lock stealing;
-- [ ] ownership release is token-checked and idempotent;
-- [ ] canonical SQLite opens only after ownership acquisition;
-- [ ] SQLite WAL and foreign-key enforcement are verified;
-- [ ] one canonical DB lifecycle/writer is owned by Companion;
-- [ ] ordered transactional migrations and persistent migration history work;
-- [ ] failed migration/bootstrap prevents READY and unwinds ownership/database resources;
-- [ ] graceful shutdown closes SQLite before releasing ownership;
-- [ ] restart against the same data root succeeds after clean shutdown;
-- [ ] no persisted data is treated as live agent/source authority;
-- [ ] existing M0.5 lifecycle semantics remain intact;
-- [ ] clean install and full regression gates pass;
-- [ ] implementation conforms to diagrams 02, 06, 10, and 11;
-- [ ] no M0.7 IPC or later feature work has begun.
+- [x] platform-aware per-user Companion data paths are deterministic and tested;
+- [x] tests do not touch the real user data directory;
+- [x] exactly one live Companion can own a selected data root;
+- [x] a competing Companion fails closed and never reaches READY;
+- [x] stale dead-owner state can be safely reclaimed without time-based lock stealing;
+- [x] ownership release is token-checked and idempotent;
+- [x] canonical SQLite opens only after ownership acquisition;
+- [x] SQLite WAL and foreign-key enforcement are verified;
+- [x] one canonical DB lifecycle/writer is owned by Companion;
+- [x] ordered transactional migrations and persistent migration history work;
+- [x] failed migration/bootstrap prevents READY and unwinds ownership/database resources;
+- [x] graceful shutdown closes SQLite before releasing ownership;
+- [x] restart against the same data root succeeds after clean shutdown;
+- [x] no persisted data is treated as live agent/source authority;
+- [x] existing M0.5 lifecycle semantics remain intact;
+- [x] clean install and full regression gates pass;
+- [x] implementation conforms to diagrams 02, 06, 10, and 11;
+- [x] no M0.7 IPC or later feature work has begun.
 
 ## Expected change shape
 
@@ -303,22 +303,19 @@ Stop and report instead of improvising if:
 
 ## Completion Evidence
 
-**Status:** NOT IMPLEMENTED.
+**Status:** IMPLEMENTED; regression gate green; awaiting independent review.
 
-When execution finishes, update only this section with factual evidence:
-
-- starting commit/branch;
-- files added/changed;
-- exact path policy implemented;
-- ownership primitive and stale-recovery semantics;
-- SQLite PRAGMAs verified;
-- migration behavior verified;
-- startup/shutdown resource ordering;
-- focused test counts;
-- spawned competing-process evidence;
-- clean install/workspace/full regression results;
-- diagram review result;
-- negative-scope audit;
-- platform/environment constraints or deviations.
+- Starting point: `planning/m0.6-persistence` at `98c5b9f793de8bb4ac08dde673b4750d25c4b2af`, descended from M0.5 merge `0be1bc51293311d14300ea6787e3fdcb1f952d7c`; clean working tree before implementation. Local upstream and read-only remote branch check both matched starting HEAD.
+- Changed: root `package.json`, `package-lock.json`, `apps/companion/package.json`, `apps/companion/src/index.ts`, `apps/companion/test/process.test.ts`; added `apps/companion/src/{paths,ownership,migrations,storage}.ts` and `apps/companion/test/storage.test.ts`; this Completion Evidence section only.
+- Paths: Windows `%LOCALAPPDATA%/Far Away`, macOS `~/Library/Application Support/Far Away`, Linux/other Unix `$XDG_DATA_HOME/far-away` or `~/.local/share/far-away`; canonical `companion.sqlite` and disk-backed `companion.owner` ownership artifact inside the root. Tests use explicit absolute temporary roots. Unix directory creation requests mode `0700`; errors fail startup with the path identified.
+- Ownership: the separate `companion.owner` SQLite artifact stores PID and UUID token. A short atomic write transaction checks the existing PID and publishes a new claim only when it is demonstrably dead; a second process-held write transaction locks the claim until token-checked release. SQLite releases that lock on crash. A crash before claim commit rolls back; a crash after commit leaves a dead PID that the next start can reclaim. Live or ambiguous PID status fails closed, and the 1000 ms lock wait is never treated as proof of death. Unit tests cover dead/live/ambiguous claims, interruption before commit, one winner among contenders, and wrong-token release. Spawned tests cover killed-process restart and two competing dead-claim reclaimers with exactly one READY process.
+- SQLite: the single Companion-owned `node:sqlite` connection opens only after ownership. Bootstrap sets a 5000 ms busy timeout, requests and verifies WAL, and enables and verifies foreign keys. The test migration observed `foreign_keys=1` on the owned connection; a read-only inspection connection observed WAL.
+- Migrations: integer versions and unique names are validated in order; persisted history must match the exact version/name prefix of definitions before any new migration runs. Valid prefix continuation runs only unapplied migrations. Retroactive insertion before applied version 2, renamed/reordered history, and unknown applied versions all fail before new work. Each new migration and `user_version` update is transactional; a thrown migration rolled back its table/history write and prevented READY. Production has only the migration-history table, no domain tables.
+- Lifecycle: path resolution/creation, owner acquisition, SQLite open/configuration, migrations, then READY. Startup failure unwinds database then ownership. Shutdown reports STOPPING, closes SQLite, releases the matching owner, reports STOPPED, then releases the executable lifetime hold; repeated runtime shutdown remains idempotent.
+- Focused tests: Companion 21 passed, 2 documented Windows signal skips. A spawned second executable sharing a live owner's temp root exited non-zero without READY; the first remained alive. A killed owner was replaced on restart, and two spawned reclaimers of a dead claim produced one READY process. Storage restart after graceful shutdown succeeded.
+- Regression: clean root `npm ci` passed; all six workspaces verified; Companion build/typecheck/tests, three M0.4 package typechecks, VS Code compile/lint and 92 tests on VS Code 1.138.0, Cloud typecheck and 73 tests across six files, aggregate `npm run validate`, and `git diff --check` all passed.
+- Diagram review: reviewed diagrams 02, 06, 10, and 11 before implementation and during final review. One Companion writer and local TB1 storage/ownership remain intact; no persisted source authority is loaded.
+- Negative-scope audit: no IPC, transport, VS Code client/activation change, adapter/discovery, canonical agent/session/outbox schema, relay, Telegram change, identity enrollment, routing/policy, or mobile work was introduced. `ARCHITECTURE.md`, canonical diagrams, and existing VS Code/Cloud/M0.4/M0.5 assertions were not changed.
+- Constraints/GAP: root, Companion, and both package-lock engine entries now require Node `>=22.17.0`, matching the tested `node:sqlite` baseline on Node 22.17.1. Windows child-process signals retain the documented two M0.5 skips. The previous persistent-recovery-claim GAP is eliminated for the corrected ownership protocol; no locked architecture CONFLICT was found. A pre-correction JSON `companion.owner` artifact is not automatically converted to the new SQLite artifact and fails closed; no migration of this unreleased M0.6 development format was attempted.
 
 Do not mark M0.6 complete in `WORKPLAN.md` until this evidence has been independently reviewed.
