@@ -4,6 +4,7 @@
   "workspaces": [
     "apps/vscode",
     "apps/cloud",
+    "apps/companion",
     "packages/domain",
     "packages/contracts",
     "packages/agent-adapter-sdk"
@@ -21,9 +22,12 @@
     "domain:typecheck": "npm run typecheck --workspace=@far-away/domain",
     "contracts:typecheck": "npm run typecheck --workspace=@far-away/contracts",
     "adapter-sdk:typecheck": "npm run typecheck --workspace=@far-away/agent-adapter-sdk",
+    "companion:build": "npm run build --workspace=@far-away/companion",
+    "companion:typecheck": "npm run typecheck --workspace=@far-away/companion",
+    "companion:test": "npm run test --workspace=@far-away/companion",
     "worker:typecheck": "npm run cloud:typecheck",
     "worker:test": "npm run cloud:test",
-    "validate": "npm run domain:typecheck && npm run contracts:typecheck && npm run adapter-sdk:typecheck && npm run extension:compile && npm run extension:lint && npm run extension:test && npm run cloud:typecheck && npm run cloud:test"
+    "validate": "npm run domain:typecheck && npm run contracts:typecheck && npm run adapter-sdk:typecheck && npm run companion:build && npm run companion:typecheck && npm run companion:test && npm run extension:compile && npm run extension:lint && npm run extension:test && npm run cloud:typecheck && npm run cloud:test"
   },
   "overrides": {
     "diff": "^8.0.4",

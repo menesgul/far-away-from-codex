@@ -160,7 +160,7 @@ Only one step is expanded in `WORKPLAN_TODO.md` at a time.
 - [x] **M0.2 — Introduce npm Workspace Root**
 - [x] **M0.3 — Move Existing Apps Without Behavior Change**
 - [x] **M0.4 — Introduce Domain / Contracts / Adapter SDK Boundaries**
-- [ ] **M0.5 — Create Standalone Companion Runtime**
+- [x] **M0.5 — Create Standalone Companion Runtime**
 - [ ] **M0.6 — Add Companion Paths, SQLite Bootstrap & Single-Instance Ownership**
 - [ ] **M0.7 — Implement Minimal Local IPC Protocol**
 - [ ] **M0.8 — Add VS Code CompanionClient**
