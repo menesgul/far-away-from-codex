@@ -2,14 +2,20 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 const WAIT_LIMIT_MS = 5_000;
 const LIVENESS_WINDOW_MS = 750;
 const executable = fileURLToPath(new URL('../src/index.js', import.meta.url));
 
-function spawnCompanion() {
+function spawnCompanion(sharedDataRoot?: string) {
+  const dataRoot = sharedDataRoot ?? mkdtempSync(join(tmpdir(), 'far-away-companion-process-'));
   const child = spawn(process.execPath, [executable], {
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, FAR_AWAY_COMPANION_TEST_DATA_ROOT: dataRoot },
   });
   let stdout = '';
   let stderr = '';
@@ -124,10 +130,11 @@ function spawnCompanion() {
       child.stdout.off('data', captureStdout);
       child.stderr.off('data', captureStderr);
       child.off('close', recordClose);
+      if (!sharedDataRoot) rmSync(dataRoot, { recursive: true, force: true });
     }
   }
 
-  return { child, waitForReady, observeSustainedLiveness, waitForClose, cleanup, output: () => stdout };
+  return { child, dataRoot, waitForReady, observeSustainedLiveness, waitForClose, cleanup, output: () => stdout, errors: () => stderr };
 }
 
 test('built Companion launches without VS Code and remains alive at READY', async () => {
@@ -138,6 +145,65 @@ test('built Companion launches without VS Code and remains alive at READY', asyn
     await companion.observeSustainedLiveness();
   } finally {
     await companion.cleanup();
+  }
+});
+
+test('second executable cannot reach READY while the first owns the data root', async () => {
+  const first = spawnCompanion();
+  let second: ReturnType<typeof spawnCompanion> | undefined;
+  try {
+    await first.waitForReady();
+    second = spawnCompanion(first.dataRoot);
+    const exit = await second.waitForClose();
+    assert.notEqual(exit.code, 0);
+    assert.doesNotMatch(second.output(), /Companion READY/);
+    assert.match(second.errors(), /owned or locked|owned or owner liveness is uncertain/);
+    await first.observeSustainedLiveness();
+  } finally {
+    await second?.cleanup();
+    await first.cleanup();
+  }
+});
+
+test('a killed Companion leaves recoverable ownership for a new process', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'far-away-companion-crash-'));
+  const first = spawnCompanion(dataRoot);
+  let second: ReturnType<typeof spawnCompanion> | undefined;
+  try {
+    await first.waitForReady();
+    await first.cleanup(); // Forced termination, without graceful ownership release.
+    second = spawnCompanion(dataRoot);
+    await second.waitForReady();
+    await second.observeSustainedLiveness();
+  } finally {
+    await second?.cleanup();
+    await first.cleanup();
+    rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('two spawned reclaimers of a dead claim produce only one READY process', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'far-away-companion-reclaim-'));
+  const ownership = new DatabaseSync(join(dataRoot, 'companion.owner'));
+  ownership.exec(`CREATE TABLE companion_owner (
+    slot INTEGER PRIMARY KEY CHECK (slot = 1), pid INTEGER NOT NULL, token TEXT NOT NULL
+  )`);
+  ownership.prepare('INSERT INTO companion_owner(slot, pid, token) VALUES (1, ?, ?)')
+    .run(777777, 'dead-claimant');
+  ownership.close();
+  const first = spawnCompanion(dataRoot);
+  const second = spawnCompanion(dataRoot);
+  try {
+    const results = await Promise.allSettled([first.waitForReady(), second.waitForReady()]);
+    assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+    const loser = results[0]?.status === 'rejected' ? first : second;
+    const exit = await loser.waitForClose();
+    assert.notEqual(exit.code, 0);
+    assert.doesNotMatch(loser.output(), /Companion READY/);
+  } finally {
+    await first.cleanup();
+    await second.cleanup();
+    rmSync(dataRoot, { recursive: true, force: true });
   }
 });
 
