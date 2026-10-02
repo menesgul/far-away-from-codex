@@ -2,406 +2,392 @@
 
 > **Current milestone:** M0 — Repository & Runtime Foundation
 >
-> **Current step:** M0.4 — Introduce Domain / Contracts / Adapter SDK Boundaries
+> **Current step:** M0.5 — Create Standalone Companion Runtime
 >
-> Implement **only this step**. Do not begin M0.5 or any later work.
+> Implement **only this step**. Do not begin M0.6 or any later work.
 
 ## Why this step exists
 
-M0.1–M0.3 established and verified the migration baseline, a single npm workspace/install graph, and physical application boundaries under `apps/vscode` and `apps/cloud`.
+M0.1–M0.3 established the repository/workspace and application boundaries. M0.4 added the provider-neutral domain, contracts, and adapter SDK boundaries.
 
-M0.4 is the first new architecture-code slice. Its purpose is deliberately narrow: create the provider-neutral package boundaries that later Companion work can depend on **without creating the Companion yet and without migrating existing application behavior into the new packages**.
+M0.5 now creates the first **actual Local Companion process boundary**.
 
-This slice establishes three contracts:
+This slice is intentionally smaller than the full B3 Local Companion architecture. Its job is to prove that Far Away has a standalone TypeScript/Node application that:
 
-```text
-packages/domain             canonical Far Away vocabulary and invariants
-packages/contracts          process/network wire-contract boundary
-packages/agent-adapter-sdk  provider-neutral adapter ports
-```
+- exists outside the VS Code extension process;
+- can be built and launched directly from the repository;
+- reaches an explicit runtime-ready state;
+- stays alive independently of VS Code;
+- shuts down cleanly;
+- has a lifecycle structure that later M0.6–M0.10 work can extend without moving authority back into VS Code or Cloud.
 
-The packages must be useful enough to compile, test, and constrain later implementation, but must not speculate ahead into IPC transport, SQLite, cloud relay, real adapters, routing, policy, or remote actions.
+M0.5 does **not** yet implement persistence, single-instance ownership, IPC, adapter execution, relay connectivity, identity, routing, or source authority.
 
 ## Verified starting state
 
-Starting point: merged M0.1–M0.3 checkpoint on `main`.
+Authoritative merged checkpoint on `main`:
 
-Expected checkpoint:
+`96963c1fce3256f599753ee9d3054df09d4b7682`
 
-`ee2e38af969fec2600831d4c6cd9d736f5e57324`
+Merge message:
+
+`Merge pull request #2 from menesgul/planning/m0.4-boundaries`
 
 At this checkpoint:
 
-- `WORKPLAN.md` marks M0.1, M0.2, and M0.3 complete and M0.4 incomplete;
-- root is an orchestration-only private npm workspace;
-- root workspaces are exactly `apps/vscode` and `apps/cloud`;
-- `apps/vscode` contains the existing extension;
-- `apps/cloud` contains the existing Cloudflare Worker;
+- `apps/` contains exactly the existing `apps/vscode` and `apps/cloud` applications;
+- there is no `apps/companion`;
+- `packages/` contains `domain`, `contracts`, and `agent-adapter-sdk`;
+- root workspaces are exactly those two applications plus those three packages;
+- root remains orchestration-only;
 - one canonical root `package-lock.json` exists;
-- `tsconfig.base.json` provides shared `strict: true` and ES2022 target invariants;
-- existing production application code was preserved by M0.3;
-- reviewed regression gate is extension compile/lint/**92 tests**, Cloud typecheck/**73 tests across 6 files**, aggregate `npm run validate` PASS;
-- the reviewed VS Code regression runtime is **1.138.0**.
+- M0.4 final review passed with no remaining GAP or CONFLICT;
+- reviewed M0.4 regression evidence is extension **92 passing** on VS Code **1.138.0** and Cloud **73 passing across 6 files** after clean install/aggregate validation.
 
-If execution does not start from the reviewed checkpoint (or a planning-only descendant of it), or the working tree contains unrelated changes, stop and report.
+Planning branch for this slice:
 
-## Architecture source
+`planning/m0.5-companion`
 
-Treat `ARCHITECTURE.md` as authoritative. For this slice, especially preserve:
+Before implementation, verify the local checkout contains this planning branch (or an implementation branch based directly on it), is up to date, and has no unrelated working-tree changes. If not, stop and report.
 
-- canonical domain is provider-neutral;
-- vendor payloads are never canonical truth;
-- Far Away `sessionKey` is distinct from source/vendor session identity;
-- lifecycle, attachment, and authority are distinct;
-- persisted state never proves live authority;
-- source resolution requires exact current correlation and authority;
-- terminal interactions do not become pending again;
-- delivery state does not change source truth;
-- support is scoped to agent + topology + version/evidence;
-- adapters expose independent optional Discovery / Observation / Resolution ports;
-- discovery is non-mutating;
-- resolution accepts only exact current source correlation plus an allowed bounded response;
-- there is no generic agent command/prompt API.
+## Architecture source — MUST REVIEW
 
-Do not reinterpret architecture in order to make package design easier. Surface a conflict instead.
+Read `ARCHITECTURE.md` before editing.
+
+For M0.5, the relevant canonical diagrams are **exactly these four**:
+
+1. `docs/diagrams/01-system-context.mmd` — establishes that Far Away sits beside the normal coding-agent workflow; the source runtime remains source authority.
+2. `docs/diagrams/02-local-component.mmd` — establishes the Local Companion as the single local Far Away authority and the future owner of adapters, canonical state, persistence, relay, IPC, and diagnostics.
+3. `docs/diagrams/10-deployment-topology.mmd` — establishes the Companion as a standalone per-user Node.js process on the desktop, separate from VS Code, Cloud, and agent runtimes.
+4. `docs/diagrams/11-trust-boundaries.mmd` — places Companion inside TB1 (trusted local OS-user boundary) and keeps source authorization at Companion revalidation rather than VS Code/Cloud.
+
+Do **not** require other diagrams for this slice:
+
+- `03-agent-integration-decision-tree` is not relevant because M0.5 implements no adapter/discovery mechanism;
+- `04-agent-event-to-attention` through `09-ios-flow` concern attention, permissions, reconnect/multi-device/remote surfaces not implemented here;
+- `06-offline-reconnect` becomes directly relevant when restart persistence/authority revalidation exists; M0.5 has no persisted authority;
+- M0.6+ must select their own diagrams from actual scope rather than inheriting this list mechanically.
+
+If code required by this slice conflicts with explicit locked architecture text, stop and report the conflict. Diagrams clarify boundaries and flows; they do not override explicit architecture text.
+
+## Locked architecture constraints for M0.5
+
+Preserve all of the following:
+
+- Local Companion is a **standalone TypeScript/Node per-user process**.
+- Companion is the future single local Far Away authority; it is not a child service whose correctness depends on the VS Code extension host remaining alive.
+- Companion does not own coding-agent source sessions.
+- VS Code remains UI/setup/bootstrap only.
+- Cloud remains routing/control only.
+- Source runtime remains source truth.
+- Companion may remain alive while VS Code is closed.
+- New Companion code must not deepen the legacy extension-owned cloud/state path.
+- No generic remote prompt/command surface may be introduced.
+- No provider/vendor payload becomes canonical domain truth.
+
+M0.5 establishes the runtime boundary only. Do not claim authority capabilities that are not implemented yet.
 
 ## Target shape for this slice
 
-M0.4 should add only:
+Add one application workspace:
 
 ```text
-packages/
-├── domain/
+apps/
+├── cloud/
+├── companion/
 │   ├── package.json
 │   ├── tsconfig.json
-│   └── src/
-├── contracts/
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── src/
-└── agent-adapter-sdk/
-    ├── package.json
-    ├── tsconfig.json
-    └── src/
+│   ├── src/
+│   │   ├── index.ts
+│   │   └── runtime.ts
+│   └── test/
+└── vscode/
 ```
 
-Tests may live package-locally where they directly verify these package contracts.
+Exact internal filenames may differ if a simpler structure is clearly better, but ownership must remain equivalent:
 
-Do **not** create `apps/companion` or `packages/test-support` in this slice. Shared test support is deferred until a real cross-package need exists.
+- one thin executable/entry point;
+- one testable Companion lifecycle/runtime boundary;
+- package-local tests only where they verify M0.5 behavior.
 
-## Package ownership
+Do not create `packages/test-support` unless a real cross-package need appears. M0.5 should not need it.
 
-### 1. `packages/domain`
+## Companion package contract
 
-Own the smallest coherent canonical vocabulary required to make the locked B1 model concrete.
+Create a private workspace package for the standalone Companion.
 
-The domain package should define explicit provider-neutral types for:
+Requirements:
 
-- `AgentDescriptor`;
-- `RuntimeTopology`;
-- `AgentSession`, including a Far Away-owned `sessionKey`;
-- `SourceSessionRef`;
-- `PendingInteraction`;
-- `SourceRequestRef`;
-- `AllowedResponse`;
-- immutable `AttentionEvent`;
-- `CapabilityProfile`;
-- `SupportProfile`;
-- `AuthorityBinding`.
+- TypeScript + Node.js;
+- compatible with the root Node `>=22` baseline;
+- extends the repository TypeScript baseline rather than inventing a conflicting compiler policy;
+- has package-local build/typecheck/test commands;
+- has an explicit runnable command/entry point that launches the built Companion independently of VS Code;
+- generated build output is not committed;
+- no production dependency should be added unless the runtime shell genuinely requires it;
+- do not copy VS Code or Cloud implementation into Companion.
 
-Also define only the supporting identifiers/enums/unions/value shapes genuinely required to express those concepts coherently.
+Add `apps/companion` explicitly to the root workspace list. Do not replace explicit workspace membership with a broad wildcard in this slice.
 
-Required semantic boundaries:
+Update the canonical root lockfile only as required for the new workspace. Unrelated dependency/version churn is a failure.
 
-- source/vendor identifiers remain wrapped as source references and never become Far Away identity;
-- `sessionKey`, interaction identity, attention-event identity, and authority generation are distinct concepts;
-- `PendingInteraction` must carry enough canonical correlation to bind an exact source request and its exact allowed response set;
-- terminal versus pending interaction state must be representable without permitting accidental resurrection by type design;
-- `AttentionEvent` represents canonical attention facts and must not contain delivery-provider state;
-- `SupportProfile` must be capable of expressing the locked taxonomy: `Interactive`, `Monitor`, `Experimental`, `Unsupported`;
-- support/capability representation must not imply authority merely because a capability exists.
+## Runtime lifecycle contract
 
-Prefer opaque/branded string identifiers where they prevent accidental cross-assignment without adding runtime complexity. Do not build a framework of speculative value objects.
+Implement the smallest lifecycle that makes the Companion a real standalone process.
 
-The domain package must not import:
+The runtime must have explicit states or equivalent observable lifecycle semantics sufficient to distinguish:
 
-- `vscode`;
-- Cloudflare types;
-- Telegram/APNs/iOS types;
-- concrete agent/vendor SDK types;
-- app implementation code;
-- wire DTOs from `packages/contracts`.
+```text
+starting → ready → stopping → stopped
+```
 
-### 2. `packages/contracts`
+Required behavior:
 
-Own **wire/process boundary contracts**, not canonical business state.
+1. process entry creates/starts exactly one Companion runtime instance within that process;
+2. successful initialization reaches **READY** without requiring VS Code, Cloud, Telegram, an agent runtime, IPC, SQLite, or network access;
+3. after READY, normal executable mode remains alive until shutdown is requested;
+4. SIGINT and SIGTERM initiate graceful shutdown where supported by Node/OS;
+5. shutdown is idempotent: repeated/concurrent stop requests do not run teardown twice or corrupt state;
+6. normal graceful shutdown exits successfully;
+7. startup failure must fail closed/non-zero rather than printing READY;
+8. lifecycle code must be testable without spawning VS Code or depending on the network;
+9. process-global signal wiring belongs at the executable boundary, not inside reusable domain/contracts packages.
 
-For M0.4, keep this intentionally minimal. Establish:
+A concise deterministic lifecycle log is acceptable and useful (for example STARTING / READY / STOPPING / STOPPED), but do not build a logging framework in this slice.
 
-- explicit protocol-version vocabulary suitable for later version negotiation;
-- generic request/response/event envelope primitives only if they can be defined without inventing M0.7 IPC methods;
-- serialization-safe DTO conventions/types needed to prove that wire contracts are distinct from canonical domain objects.
+Do not invent fake initialization work merely to populate lifecycle phases.
 
-It is acceptable—and preferable—to keep this package very small if no concrete wire message belongs to M0.4.
+## Authority semantics
 
-Do **not** define M0.7's `hello`, `health.get`, or `companion.status` message set here yet. M0.7 owns the actual minimal IPC protocol.
+The word **READY** in M0.5 means only:
 
-Do not add:
+> the standalone Companion runtime shell initialized successfully and is alive.
 
-- Named Pipe/UDS transport code;
-- socket/server/client implementations;
-- local authentication/challenge flow;
-- cloud relay envelopes;
-- Telegram callback contracts;
-- mobile/APNs contracts;
-- generic `sendPrompt`, `executeCommand`, `runAgent`, or arbitrary command payloads.
+It does **not** mean:
 
-The contracts package must not import application implementations.
+- a coding-agent runtime was discovered;
+- a source session is attached;
+- an `AuthorityBinding` is current;
+- persisted state was recovered;
+- IPC is accepting clients;
+- cloud relay is authenticated;
+- the installation is enrolled;
+- source resolution is available.
 
-### 3. `packages/agent-adapter-sdk`
-
-Own provider-neutral adapter ports/contracts. It may depend on `packages/domain`; it must not depend on apps or concrete adapters.
-
-Define the `AgentAdapter` boundary with independently optional:
-
-- `DiscoveryPort`;
-- `ObservationPort`;
-- `ResolutionPort`.
-
-Required port semantics:
-
-**Discovery**
-- non-mutating;
-- reports discoverable runtimes/sessions/evidence without claiming canonical authority by itself;
-- supports more than one simultaneous session/runtime.
-
-**Observation**
-- asynchronous event/observation surface;
-- preserves source/session/request correlation needed for later canonicalization;
-- does not expose vendor payloads as canonical domain truth.
-
-**Resolution**
-- accepts an exact `SourceRequestRef`/current authority context and one allowed bounded response;
-- result distinguishes source-confirmed resolution from rejection/stale/not-authoritative/unknown outcomes;
-- no blind retry semantics;
-- no arbitrary prompt/command surface.
-
-The SDK must be implementable by different integration mechanisms (native hooks/APIs/plugins/event streams/ACP where appropriate) without encoding ACP or any one vendor as the abstraction.
-
-Do not add a concrete Codex, Claude, OpenCode, Qwen, Cline, Gemini, Cursor, or Grok adapter.
+Tests and comments must not blur runtime readiness with source/live authority.
 
 ## Dependency direction
 
-For this slice, enforce:
+For this slice:
 
 ```text
+apps/companion
+    ↓ (only when actually needed)
 packages/domain
-    ↑
+packages/contracts
 packages/agent-adapter-sdk
-
-packages/contracts   (independent unless a concrete, justified domain type dependency is necessary)
 ```
 
-Applications do not need to consume these packages yet. M0.4 establishes boundaries; later slices introduce actual consumers.
+The Companion app may depend on the new packages only if M0.5 runtime-shell code actually uses their public types. Do not add ornamental dependencies just to make the future architecture visible.
 
-Forbidden dependencies:
+Forbidden dependency directions remain:
+
+- `packages/domain` → app code;
+- `packages/contracts` → app implementation;
+- `packages/agent-adapter-sdk` → Companion implementation;
+- `apps/vscode` → Companion source imports;
+- `apps/cloud` → Companion source imports.
+
+Do not modify the M0.4 public domain/adapter contracts merely to make this runtime shell convenient. If a real incompatibility is found, stop and report it.
+
+## Root orchestration
+
+Update root orchestration minimally so Companion participates in repository validation.
+
+Expected root-level commands should include equivalent gates for:
+
+- Companion build;
+- Companion typecheck;
+- Companion tests.
+
+`npm run validate` must include the Companion gates while preserving all existing domain/contracts/adapter, VS Code, and Cloud gates.
+
+Do not turn the root into an application package.
+
+## Tests required in M0.5
+
+Add focused tests for lifecycle behavior, not future architecture.
+
+At minimum verify:
+
+- fresh runtime starts in the expected pre-ready state;
+- successful start reaches READY;
+- stop after READY reaches STOPPED;
+- stop is idempotent;
+- startup failure does not report READY and results in a failed startup contract;
+- lifecycle can be exercised without VS Code/network/IPC/SQLite.
+
+Where practical, add a standalone process smoke test or deterministic command-level check proving the built Companion can launch independently and expose READY. Do not create an IPC endpoint merely to make the smoke test easier.
+
+Tests must not rely on arbitrary sleeps when a deterministic lifecycle hook/event/promise can be used.
+
+## Existing behavior / regression contract
+
+M0.5 must not alter production behavior in `apps/vscode` or `apps/cloud`.
+
+Existing migration behavior remains:
 
 ```text
-domain             -> contracts / adapter-sdk / apps / provider SDKs
-contracts          -> apps / provider SDKs
-agent-adapter-sdk  -> apps / concrete adapters / provider SDKs
+Existing vertical slice:
+VS Code → legacy cloud client → Cloud Worker → Telegram pairing
+
+New foundation:
+standalone Companion runtime shell
+(no VS Code client path yet)
 ```
 
-Avoid circular workspace dependencies.
+The new Companion is not wired into the extension in this slice.
 
-## Workspace and package rules
+Required regression gate:
 
-Update root workspace membership to include exactly the existing apps plus the three new packages:
+1. clean root install succeeds;
+2. npm recognizes all six explicit workspaces:
+   - `apps/vscode`
+   - `apps/cloud`
+   - `apps/companion`
+   - `packages/domain`
+   - `packages/contracts`
+   - `packages/agent-adapter-sdk`
+3. Companion build/typecheck/tests pass;
+4. extension compile/lint/**92 tests on VS Code 1.138.0** pass;
+5. Cloud typecheck/**73 tests across 6 files** pass;
+6. all M0.4 package typechecks remain green;
+7. aggregate root `npm run validate` passes;
+8. `git diff --check` passes;
+9. no existing application test is deleted, skipped, weakened, or rewritten merely to make the gate pass.
 
-```json
-[
-  "apps/vscode",
-  "apps/cloud",
-  "packages/domain",
-  "packages/contracts",
-  "packages/agent-adapter-sdk"
-]
-```
+If the VS Code Electron test runner hits the known sandbox `spawn EPERM` restriction, request/obtain the required execution permission and rerun rather than treating it as a product failure.
 
-Do not add speculative `packages/*` or `apps/*` globs in this slice.
+## Explicitly forbidden in M0.5
 
-Use private internal package names under one consistent Far Away namespace. Do not publish packages or add publishing configuration.
+Do **not** implement any of the following:
 
-Preserve the single canonical root lockfile; do not create nested lockfiles.
+- Companion data/config directory policy;
+- SQLite, WAL, schema, migration runner, repositories, durable outbox;
+- single-instance lock/mutex/lease/ownership;
+- Named Pipe, Unix Domain Socket, local TCP, HTTP, WebSocket, or any IPC server/client;
+- `hello`, `health.get`, `companion.status`, protocol envelopes, framing, negotiation, challenge/auth;
+- VS Code `CompanionClient`, Companion bootstrap/install/update integration, or activation changes;
+- adapter manager;
+- concrete or fake production adapters;
+- agent discovery/observation/resolution;
+- canonical session/PendingInteraction state management;
+- D1 routing, D2 escalation, D3 policy, D4 synthetic attention, D5 inbox;
+- cloud relay client or Companion ↔ cloud WebSocket;
+- Telegram behavior changes;
+- identity enrollment, installation keys, secure-store integration, OAuth, P-256/ES256;
+- iOS/APNs/Live Activity/Dynamic Island;
+- generic `sendPrompt`, `executeCommand`, `runAgent`, arbitrary command execution, or equivalent control API.
 
-Keep dependency additions minimal. Prefer TypeScript-only package contracts with no new runtime dependency unless implementation proves one is necessary. Do not upgrade existing dependencies.
+Important: **do not open a local TCP port even temporarily.** M0.5 needs no transport at all.
 
-## Build and test contract
+## Relevant diagrams — MUST REVIEW
 
-Each new package must have an explicit package-local typecheck/build or equivalent compile gate. Add focused tests only where runtime helpers/invariant constructors exist; do not manufacture tests for compile-time-only aliases merely to increase counts.
+Before implementation and again during final self-review:
 
-Root orchestration must gain named gates for the new packages and include them in aggregate validation without weakening existing gates.
+- [ ] `docs/diagrams/01-system-context.mmd`
+- [ ] `docs/diagrams/02-local-component.mmd`
+- [ ] `docs/diagrams/10-deployment-topology.mmd`
+- [ ] `docs/diagrams/11-trust-boundaries.mmd`
 
-Existing regression requirements remain:
+Review questions:
 
-- extension compile: PASS;
-- extension lint: PASS;
-- extension tests: **92 passing** using VS Code **1.138.0**;
-- Cloud typecheck: PASS;
-- Cloud tests: **73 passing across 6 files**;
-- aggregate root validation: PASS;
-- no silent test-count decrease.
+- Does Companion remain a separate local process beside VS Code rather than inside it?
+- Does the implementation preserve the source runtime as source authority?
+- Is the new runtime entirely inside the local OS-user trust boundary?
+- Is VS Code still optional UI/bootstrap rather than runtime authority?
+- Has any future DB/secure-store/relay/IPC/adapter responsibility been prematurely implemented?
+- Does READY describe runtime health only, not source authority?
 
-New package gates must also pass from a clean root install.
-
-## Boundary verification
-
-Before completion, explicitly audit imports and exported APIs.
-
-Verify that:
-
-- domain source contains no VS Code/Cloudflare/Telegram/APNs/iOS/vendor-agent imports or vocabulary leakage;
-- contracts contains no app implementation imports and no generic agent-control API;
-- adapter SDK contains no concrete provider dependency or provider-specific public type;
-- apps have not been rewritten to use the new packages in this slice;
-- no source-affecting implementation exists;
-- no `apps/companion` exists;
-- no IPC transport, SQLite, relay, routing, escalation, policy, inbox, OAuth/P-256, mobile, or production adapter implementation has appeared.
-
-A simple repository search/guard is sufficient for this slice; do not prematurely build the full M0.10 architecture-test system.
-
-## Tasks
-
-- [ ] Confirm starting HEAD is the reviewed M0.1–M0.3 checkpoint or a planning-only descendant and working tree is clean.
-- [ ] Re-read `ARCHITECTURE.md`, this active slice, and the current workspace/package manifests before editing.
-- [ ] Create only `packages/domain`, `packages/contracts`, and `packages/agent-adapter-sdk`.
-- [ ] Give each package a private internal package manifest and package-local TypeScript configuration.
-- [ ] Add the three package paths explicitly to root workspaces.
-- [ ] Update the canonical root lockfile without unrelated dependency churn.
-- [ ] Implement the minimal canonical domain vocabulary listed above.
-- [ ] Keep provider/source identity distinct from Far Away identity in exported types.
-- [ ] Model pending interaction correlation, allowed bounded responses, attention events, capabilities, support profile, and authority binding without delivery/provider leakage.
-- [ ] Implement independent optional Discovery / Observation / Resolution adapter ports.
-- [ ] Ensure resolution is exact/correlated/bounded and exposes no generic command API.
-- [ ] Establish only minimal protocol-version/wire-boundary primitives in `packages/contracts`; do not implement M0.7 messages.
-- [ ] Add package-local typecheck/build gates.
-- [ ] Add focused tests only for runtime invariants/helpers actually introduced.
-- [ ] Add root orchestration gates for all three packages and include them in `npm run validate`.
-- [ ] Run a clean root install and verify npm recognizes all five workspaces.
-- [ ] Run all new package gates.
-- [ ] Run extension compile/lint/tests and retain 92 passing on VS Code 1.138.0.
-- [ ] Run Cloud typecheck/tests and retain 73 passing across 6 files.
-- [ ] Run root aggregate validation.
-- [ ] Audit dependency direction and public exports.
-- [ ] Search for forbidden provider/app imports and generic command/prompt APIs in the new packages.
-- [ ] Confirm existing app production code has not been semantically migrated/refactored.
-- [ ] Confirm no M0.5+ implementation exists.
-- [ ] Record exact package APIs, dependency graph, commands/results, test counts, lockfile review, and deviations under Completion Evidence.
-
-## Required regression gate
-
-M0.4 must preserve all reviewed M0.3 behavior while adding only architecture package boundaries.
-
-Required:
-
-- clean root install succeeds;
-- all five npm workspaces are recognized;
-- all three new package compile/typecheck gates pass;
-- extension compile/lint/**92 tests** pass on VS Code **1.138.0**;
-- Cloud typecheck/**73 tests across 6 files** pass;
-- aggregate `npm run validate` passes;
-- existing app production behavior remains unchanged;
-- no existing test is deleted, skipped, or weakened;
-- no unexplained dependency-version churn occurs.
+Any NO/unclear answer is a review finding.
 
 ## Acceptance criteria
 
-M0.4 is complete only when:
+M0.5 is complete only when:
 
-- [ ] `packages/domain` exists and exports the canonical provider-neutral vocabulary required by the locked architecture;
-- [ ] `packages/contracts` exists as a deliberately small wire-contract boundary and does not pre-implement M0.7;
-- [ ] `packages/agent-adapter-sdk` exists and exports optional Discovery / Observation / Resolution ports;
-- [ ] adapter resolution is exact, bounded, correlation-aware, and contains no generic command/prompt API;
-- [ ] package dependency direction is acyclic and architecture-compliant;
-- [ ] no provider-specific types leak into canonical public APIs;
-- [ ] no application becomes canonical authority through this work;
-- [ ] root remains orchestration-only;
-- [ ] one root lockfile remains canonical;
-- [ ] clean install and all package/application regression gates pass;
-- [ ] no `apps/companion`, IPC transport, SQLite, production adapter, routing/policy/inbox, relay, auth migration, or mobile implementation has begun;
-- [ ] M0.5 has not started.
+- [x] `apps/companion` exists as a private TypeScript/Node workspace application;
+- [x] Companion builds to runnable JavaScript and can launch directly without VS Code;
+- [x] Companion reaches an explicit READY state after successful runtime-shell initialization;
+- [x] normal executable mode remains alive until shutdown is requested;
+- [x] SIGINT/SIGTERM are handled as graceful shutdown requests where supported;
+- [x] shutdown is idempotent and reaches STOPPED;
+- [x] startup failure does not report READY and has non-success failure semantics;
+- [x] lifecycle behavior is covered by focused deterministic tests;
+- [x] root workspace membership explicitly contains the six expected workspaces;
+- [x] root validation includes Companion build/typecheck/tests;
+- [x] one canonical root lockfile remains;
+- [x] existing M0.4 package boundaries remain intact;
+- [x] existing VS Code and Cloud production behavior is unchanged;
+- [x] clean install and full regression gates pass;
+- [x] the implementation conforms to diagrams 01, 02, 10, and 11;
+- [x] no M0.6 persistence/path/single-instance work has begun;
+- [x] no M0.7 IPC work or later feature work has begun.
 
 ## Expected change shape
 
-Expected categories:
+A conforming M0.5 diff should be dominated by:
 
 ```text
-packages/domain/**             new canonical domain types + package config
-packages/contracts/**          minimal wire/version primitives + package config
-packages/agent-adapter-sdk/**  provider-neutral adapter ports + package config
-package.json                   explicit workspace + orchestration gate additions
-package-lock.json              three workspace additions, minimal dependency graph changes
-WORKPLAN_TODO.md               this slice + execution evidence after implementation
+apps/companion/**
+package.json
+package-lock.json
+WORKPLAN_TODO.md
 ```
 
-Existing `apps/vscode/src/**`, `apps/cloud/src/**`, Cloud migrations, and existing tests should not require semantic edits.
+Tests/configuration directly belonging to `apps/companion` are expected.
 
-## Do not
+`WORKPLAN.md` should not be marked M0.5 complete by the implementation agent. M0.4 may already be marked complete by the reviewed planning checkpoint.
 
-During M0.4:
+Unexpected edits to these areas require explanation and usually mean scope drift:
 
-- do not create or start Companion;
-- do not create `apps/companion`;
-- do not add Named Pipe/UDS/local TCP code;
-- do not add SQLite;
-- do not implement IPC `hello`, `health.get`, or `companion.status`;
-- do not add real agent discovery/observation/resolution implementations;
-- do not add ACP transport/client/server code;
-- do not migrate `BackendClient`, `SecretStore`, or Telegram ownership;
-- do not change Telegram behavior;
-- do not change Cloud routes/D1 schema/authentication;
-- do not add D1 routing, D2 escalation, D3 policy, D4 synthetic attention, or D5 inbox;
-- do not add OAuth/P-256/relay authentication;
-- do not add production relay WebSocket;
-- do not add iOS/APNs/Live Activity/Dynamic Island code;
-- do not introduce generic remote prompt/command APIs;
-- do not use provider-specific payloads as domain objects;
-- do not add dependencies or upgrade versions without a demonstrated M0.4 need;
-- do not refactor existing apps merely to consume the new packages;
-- do not create speculative `test-support`;
-- do not begin M0.5.
+```text
+apps/vscode/**
+apps/cloud/**
+packages/domain/**
+packages/contracts/**
+packages/agent-adapter-sdk/**
+docs/diagrams/**
+ARCHITECTURE.md
+```
 
 ## Stop conditions
 
-Stop and report rather than improvising if:
+Stop and report instead of improvising if:
 
-- a canonical type cannot be defined without resolving an architecture ambiguity not covered by `ARCHITECTURE.md`;
-- the adapter ports appear to require a provider-specific concept in their public API;
-- exact resolution cannot be expressed without inventing source-authority semantics beyond the locked model;
-- a useful contracts package appears to require defining M0.7 IPC methods early;
-- package setup requires changing existing app runtime/module semantics;
-- lockfile update introduces unexplained dependency-version churn;
-- existing extension/Cloud regression counts cannot be reproduced;
-- implementation would require migrating application behavior into the new packages;
-- the slice starts pulling Companion, persistence, IPC transport, routing, auth, relay, or concrete adapters forward.
+- the local starting point does not contain merged M0.4;
+- unrelated local changes are present;
+- implementing standalone lifecycle appears to require IPC, SQLite, single-instance ownership, cloud connectivity, VS Code integration, or an agent adapter;
+- the proposed runtime would only work while the VS Code extension host is alive;
+- a package boundary from M0.4 must be weakened or inverted;
+- tests require changing existing application semantics;
+- a locked architecture/diagram conflict is discovered.
 
-A desire for a cleaner future abstraction is not permission to expand M0.4.
+A desire to make M0.6/M0.7 easier is not permission to implement them early.
 
 ## Completion Evidence
 
-**Status:** IMPLEMENTED; evidence recorded for review. `WORKPLAN.md` remains unchanged.
+**Status:** M0.5 lifetime correction validated on Windows; executable signal delivery remains platform-limited; awaiting independent review.
 
-- Start: `planning/m0.4-boundaries` at `b18bda20bddaaa82f4e79e9c2a0f1aaafadda5b8`, a planning-only direct descendant of reviewed merge `ee2e38af969fec2600831d4c6cd9d736f5e57324`; `git status --short` was empty before edits.
-- Added private type-only packages `@far-away/domain`, `@far-away/contracts`, and `@far-away/agent-adapter-sdk` (all `0.0.1`). Each has a package-local `tsc --noEmit` gate; no runtime helpers were introduced. The SDK has one focused compile-time contract test for required request correlation/allowance and resolution allowance.
-- Exact `@far-away/domain` type exports: `AgentId`, `SessionKey`, `InteractionId`, `AttentionEventId`, `AuthorityGeneration`, `SourceRuntimeId`, `SourceSessionId`, `SourceRequestId`, `AgentDescriptor`, `RuntimeTopology`, `SourceSessionRef`, `SourceRequestRef`, `SessionLifecycle`, `SessionAttachment`, `AgentSession`, `AllowedResponse`, `BoundedResponse`, `PendingInteraction`, `AttentionEvent`, `AdapterCapability`, `CapabilityProfile`, `SupportLevel`, `SupportProfile`, `AuthorityBinding`. Branded Far Away and source IDs are distinct; pending/terminal interaction variants are discriminated and only pending carries allowed responses. Authority binding is a record, not a live-authority assertion.
-- Exact `@far-away/contracts` type exports: `ProtocolVersion` (`major`, `minor`) and recursive JSON-safe `JsonValue`. No message methods or transport exist.
-- Exact `@far-away/agent-adapter-sdk` type exports: `DiscoveredRuntime`, `DiscoveryPort`, `SourceObservation`, `ObservationPort`, `ResolutionInput`, `ResolutionOutcome`, `ResolutionPort`, `AgentAdapter`. Port methods are `discover(): Promise<readonly DiscoveredRuntime[]>`, `observe(sourceSession: SourceSessionRef): AsyncIterable<SourceObservation>`, and `resolve(input: ResolutionInput): Promise<ResolutionOutcome>`. `AgentAdapter` has an `agent` descriptor and independent optional `discovery`, `observation`, and `resolution` properties. `SourceObservation` is a discriminated union of `humanInputRequested` (exact `SourceRequestRef` and nonempty source-defined `AllowedResponse` tuple), `requestClosed` (exact request reference and optional resolved/cancelled/expired reason), `sessionLifecycle` (source session and domain `SessionLifecycle`), `progress` (source session), and `outcome` (source session and succeeded/failed/cancelled outcome). Every variant carries `observedAt`; free-form `evidence` is optional diagnostics and is not needed to identify the event or its request allowance. `ResolutionInput` requires exact `SourceRequestRef`, `AuthorityBinding`, selected `AllowedResponse`, and `BoundedResponse`; outcome statuses are `sourceConfirmed`, `rejected`, `stale`, `notAuthoritative`, and `unknown`. Current correlation/authority/allowance checks remain the later Companion's responsibility.
-- Dependency graph: `agent-adapter-sdk -> domain`; `contracts` and `domain` have no workspace dependencies. Neither existing app depends on a new package. No external runtime dependency or existing dependency version was added/upgraded.
-- Root workspaces are exactly `apps/vscode`, `apps/cloud`, `packages/domain`, `packages/contracts`, `packages/agent-adapter-sdk`. `npm ci` passed and `npm ls --workspaces --depth=0 --json` recognized all five. One root lockfile remains. Lock review against HEAD: 349 pre-existing package entries unchanged, root workspace list extended, six new entries only (three package records and three links); no version or dependency-tree churn.
-- Gates: `npm run domain:typecheck`, `npm run contracts:typecheck`, and `npm run adapter-sdk:typecheck` each passed individually. After the observation correction, `npm ci` passed and post-install aggregate `npm run validate` passed, including all three package typechecks, the SDK's compile-time negative checks, extension compile and lint, extension **92 passing** on VS Code **1.138.0**, Cloud typecheck, and Cloud **73 passing across 6 files**. No runtime package tests were added for type-only APIs.
-- Boundary audit: `rg` search of the new packages found no imports from VS Code, Cloudflare, Telegram, APNs/iOS, concrete agents, or app code; no generic `sendPrompt`, `executeCommand`, or `runAgent` API. Public exports were enumerated above. Source-only scope search found no IPC, SQLite, relay, routing, escalation, policy, inbox, authentication, mobile, or concrete adapter implementation; mentions of Companion and IPC occur only in explanatory comments. `Test-Path apps/companion` returned `False`.
-- Existing-app audit: `git diff --name-only -- apps/vscode apps/cloud WORKPLAN.md` was empty. Existing application production code and tests were not edited, deleted, skipped, or weakened. `git diff --check` passed.
-- Review correction and diagram audit: typed observation variants now supply request meaning, correlation, and response constraints without interpreting vendor evidence strings. `docs/diagrams/02-local-component.mmd` still places Observation Ports before Adapter Manager and Companion-owned Canonical Domain State; `03-agent-integration-decision-tree.mmd` requires documented relevant events and exact correlated bounded response; `11-trust-boundaries.mmd` keeps SourceRequestRef at the source boundary and canonical authorization at Companion revalidation. The corrected SDK follows all three; no canonical state or authority moved into the SDK. Discovery, Observation, and Resolution remain separately optional. The reviewed observation GAP is resolved; no remaining M0.4 GAP or CONFLICT was found in this audit.
-- Environment/deviations: initial `npm ci --offline` could not find cached `zod`; approved normal `npm ci` passed. First sandboxed `npm run validate` reached extension tests but Electron launch failed with `spawn EPERM`; approved GUI run passed in full. Cloud tests warned that local Telegram development secrets were absent, without failures. Eleven unrelated untracked `docs/diagrams/*.mmd` files appeared after the clean-tree start; they were not created, edited, or removed by this slice and remain outside its diff.
+- Starting point: clean `planning/m0.5-companion` at `4df08b3405baa106a66e9eb84ce1bfbaeb702f6e`, matching `origin/planning/m0.5-companion` and descending from merged M0.4 commit `96963c1fce3256f599753ee9d3054df09d4b7682`.
+- Added: `apps/companion/package.json`, `apps/companion/tsconfig.json`, `apps/companion/src/index.ts`, `apps/companion/src/runtime.ts`, `apps/companion/test/runtime.test.ts`, `apps/companion/test/process.test.ts`. Modified: root `package.json`, root `package-lock.json`, and this Completion Evidence section only.
+- `@far-away/companion` is a private Node `>=22` TypeScript ESM workspace. It extends `tsconfig.base.json`, emits runnable JavaScript under ignored `dist/`, and provides package-local `build`, `typecheck`, `test`, and `start` scripts. The standalone entry point is built `dist/src/index.js`; the root adds Companion build/typecheck/test gates to `validate`.
+- The runtime starts in `starting`, reaches `ready` after successful shell initialization, and stays alive in executable mode until shutdown. The executable owns a referenced, in-process `MessageChannel` event-loop hold; it sends no messages and opens no transport. Shutdown or startup failure removes signal listeners and closes both ports, allowing natural exit. SIGINT/SIGTERM request shutdown where supported; concurrent/repeated stops share one teardown and reach `stopped`. Initialization rejection never reports READY and rejects startup; the executable sets a non-zero exit code on startup failure. READY describes process-shell health only.
+- CompanionRuntime unit tests verified initial state/READY/STOPPED and one teardown for concurrent/repeated stops, failed initialization without READY, and stop requested during initialization without READY (3 passed). A spawned-process test launched the real built `dist/src/index.js` without VS Code, observed `Companion STARTING` and `Companion READY`, then verified continued liveness over a 750 ms observation window before force-cleaning and reaping the child (1 passed). A separate direct terminal launch remained at READY for 10 seconds instead of exiting; Ctrl+C then produced STOPPING and STOPPED. Independent spawned-process SIGINT and SIGTERM cases assert READY, STOPPING, STOPPED, and successful exit on platforms where Node can deliver those signals to the child; both cases were skipped on this Windows run and their executable handler behavior is **not verified by those cases here**.
+- The process-test helper bounds READY and graceful-close waits at 5 seconds each, reports captured stdout/stderr on timeout, and uses `SIGKILL` plus a bounded close wait to reap a child still alive after failure. Test listeners and timers are removed after each wait and cleanup. The 750 ms timer is solely a post-READY liveness observation; READY and shutdown remain event-driven.
+- `npm ci` passed from the root. `npm ls --workspaces --depth=0` recognized all six explicit workspaces. The single root lockfile changed only for the Companion workspace record/link and workspace membership; no unrelated dependency versions changed. Companion adds no production dependency and imports no M0.4 package merely for architecture shape.
+- Boundary audit: no edits to VS Code, Cloud, domain, contracts, adapter SDK, diagrams, or `ARCHITECTURE.md`; no existing application test changed. No IPC server/client/protocol or TCP transport, SQLite/persistence/path policy, single-instance ownership, adapter/discovery, relay/cloud integration, authentication, routing, Telegram change, or mobile work was introduced. The in-process event-loop hold is used only for executable lifetime.
+- Diagrams `01-system-context`, `02-local-component`, `10-deployment-topology`, and `11-trust-boundaries` were rereviewed after the lifetime correction. The confirmed running Companion process is separate from VS Code inside TB1; VS Code stays optional, source runtime stays source authority, and future Companion responsibilities remain unimplemented. All M0.5 diagram review questions passed.
+- After the lifetime correction, `npm run companion:build`, `npm run companion:typecheck`, and focused `npm run companion:test` passed (4 passed, 2 platform skips). A fresh root `npm ci` passed; `npm ls --workspaces --depth=0` recognized all six workspaces. The complete post-install `npm run validate` passed: three M0.4 package typechecks; Companion build/typecheck and 4 passing tests with 2 Windows signal skips; extension compile/lint and **92 passing** on VS Code **1.138.0**; Cloud typecheck and **73 passing across 6 files**. `git diff --check` passed.
+- Environment constraints: sandboxed `npm ci` lacked a cached registry response, so clean install ran with registry access. Sandboxed Node test child processes returned `spawn EPERM`, so process tests and the full gate ran with execution permission. On Windows, Node `child.kill('SIGINT'/'SIGTERM')` cannot reliably prove delivery to the child's JavaScript handlers; both executable signal tests are explicitly skipped here. The unit tests prove runtime shutdown semantics. Direct terminal Ctrl+C produced STOPPING/STOPPED, but PowerShell returned status 1 for the interrupted command, so successful graceful signal exit remains to be verified on a platform that supports the spawned-process assertions.
 
-Do not mark M0.4 complete in `WORKPLAN.md` until this evidence has been reviewed.
+Do not mark M0.5 complete in `WORKPLAN.md` until this evidence has been independently reviewed.
