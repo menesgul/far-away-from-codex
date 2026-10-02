@@ -389,21 +389,19 @@ A desire for a cleaner future abstraction is not permission to expand M0.4.
 
 ## Completion Evidence
 
-**Status:** NOT EXECUTED
+**Status:** IMPLEMENTED; evidence recorded for review. `WORKPLAN.md` remains unchanged.
 
-After implementation, record:
-
-- starting commit/branch and clean-tree confirmation;
-- package names and exact exported public API;
-- dependency graph;
-- workspace/lockfile result and dependency-version review;
-- package typecheck/build/test results;
-- extension compile/lint/test result and exact count/runtime;
-- Cloud typecheck/test result and exact count;
-- aggregate validation result;
-- forbidden-import/API audit;
-- existing-app semantic-diff audit;
-- M0.5+ scope audit;
-- deviations/environment issues.
+- Start: `planning/m0.4-boundaries` at `b18bda20bddaaa82f4e79e9c2a0f1aaafadda5b8`, a planning-only direct descendant of reviewed merge `ee2e38af969fec2600831d4c6cd9d736f5e57324`; `git status --short` was empty before edits.
+- Added private type-only packages `@far-away/domain`, `@far-away/contracts`, and `@far-away/agent-adapter-sdk` (all `0.0.1`). Each has a package-local `tsc --noEmit` gate; no runtime helpers were introduced. The SDK has one focused compile-time contract test for required request correlation/allowance and resolution allowance.
+- Exact `@far-away/domain` type exports: `AgentId`, `SessionKey`, `InteractionId`, `AttentionEventId`, `AuthorityGeneration`, `SourceRuntimeId`, `SourceSessionId`, `SourceRequestId`, `AgentDescriptor`, `RuntimeTopology`, `SourceSessionRef`, `SourceRequestRef`, `SessionLifecycle`, `SessionAttachment`, `AgentSession`, `AllowedResponse`, `BoundedResponse`, `PendingInteraction`, `AttentionEvent`, `AdapterCapability`, `CapabilityProfile`, `SupportLevel`, `SupportProfile`, `AuthorityBinding`. Branded Far Away and source IDs are distinct; pending/terminal interaction variants are discriminated and only pending carries allowed responses. Authority binding is a record, not a live-authority assertion.
+- Exact `@far-away/contracts` type exports: `ProtocolVersion` (`major`, `minor`) and recursive JSON-safe `JsonValue`. No message methods or transport exist.
+- Exact `@far-away/agent-adapter-sdk` type exports: `DiscoveredRuntime`, `DiscoveryPort`, `SourceObservation`, `ObservationPort`, `ResolutionInput`, `ResolutionOutcome`, `ResolutionPort`, `AgentAdapter`. Port methods are `discover(): Promise<readonly DiscoveredRuntime[]>`, `observe(sourceSession: SourceSessionRef): AsyncIterable<SourceObservation>`, and `resolve(input: ResolutionInput): Promise<ResolutionOutcome>`. `AgentAdapter` has an `agent` descriptor and independent optional `discovery`, `observation`, and `resolution` properties. `SourceObservation` is a discriminated union of `humanInputRequested` (exact `SourceRequestRef` and nonempty source-defined `AllowedResponse` tuple), `requestClosed` (exact request reference and optional resolved/cancelled/expired reason), `sessionLifecycle` (source session and domain `SessionLifecycle`), `progress` (source session), and `outcome` (source session and succeeded/failed/cancelled outcome). Every variant carries `observedAt`; free-form `evidence` is optional diagnostics and is not needed to identify the event or its request allowance. `ResolutionInput` requires exact `SourceRequestRef`, `AuthorityBinding`, selected `AllowedResponse`, and `BoundedResponse`; outcome statuses are `sourceConfirmed`, `rejected`, `stale`, `notAuthoritative`, and `unknown`. Current correlation/authority/allowance checks remain the later Companion's responsibility.
+- Dependency graph: `agent-adapter-sdk -> domain`; `contracts` and `domain` have no workspace dependencies. Neither existing app depends on a new package. No external runtime dependency or existing dependency version was added/upgraded.
+- Root workspaces are exactly `apps/vscode`, `apps/cloud`, `packages/domain`, `packages/contracts`, `packages/agent-adapter-sdk`. `npm ci` passed and `npm ls --workspaces --depth=0 --json` recognized all five. One root lockfile remains. Lock review against HEAD: 349 pre-existing package entries unchanged, root workspace list extended, six new entries only (three package records and three links); no version or dependency-tree churn.
+- Gates: `npm run domain:typecheck`, `npm run contracts:typecheck`, and `npm run adapter-sdk:typecheck` each passed individually. After the observation correction, `npm ci` passed and post-install aggregate `npm run validate` passed, including all three package typechecks, the SDK's compile-time negative checks, extension compile and lint, extension **92 passing** on VS Code **1.138.0**, Cloud typecheck, and Cloud **73 passing across 6 files**. No runtime package tests were added for type-only APIs.
+- Boundary audit: `rg` search of the new packages found no imports from VS Code, Cloudflare, Telegram, APNs/iOS, concrete agents, or app code; no generic `sendPrompt`, `executeCommand`, or `runAgent` API. Public exports were enumerated above. Source-only scope search found no IPC, SQLite, relay, routing, escalation, policy, inbox, authentication, mobile, or concrete adapter implementation; mentions of Companion and IPC occur only in explanatory comments. `Test-Path apps/companion` returned `False`.
+- Existing-app audit: `git diff --name-only -- apps/vscode apps/cloud WORKPLAN.md` was empty. Existing application production code and tests were not edited, deleted, skipped, or weakened. `git diff --check` passed.
+- Review correction and diagram audit: typed observation variants now supply request meaning, correlation, and response constraints without interpreting vendor evidence strings. `docs/diagrams/02-local-component.mmd` still places Observation Ports before Adapter Manager and Companion-owned Canonical Domain State; `03-agent-integration-decision-tree.mmd` requires documented relevant events and exact correlated bounded response; `11-trust-boundaries.mmd` keeps SourceRequestRef at the source boundary and canonical authorization at Companion revalidation. The corrected SDK follows all three; no canonical state or authority moved into the SDK. Discovery, Observation, and Resolution remain separately optional. The reviewed observation GAP is resolved; no remaining M0.4 GAP or CONFLICT was found in this audit.
+- Environment/deviations: initial `npm ci --offline` could not find cached `zod`; approved normal `npm ci` passed. First sandboxed `npm run validate` reached extension tests but Electron launch failed with `spawn EPERM`; approved GUI run passed in full. Cloud tests warned that local Telegram development secrets were absent, without failures. Eleven unrelated untracked `docs/diagrams/*.mmd` files appeared after the clean-tree start; they were not created, edited, or removed by this slice and remain outside its diff.
 
 Do not mark M0.4 complete in `WORKPLAN.md` until this evidence has been reviewed.

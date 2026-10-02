@@ -1,0 +1,25 @@
+flowchart LR
+    U[User]
+    VS[VS Code / CLI]
+    AR[Coding Agent Runtime]
+    FA[Far Away System]
+    TG[Telegram]
+    IOS[Native iOS]
+    APNS[Apple APNs / ActivityKit]
+    IDP[Account OAuth / Identity]
+
+    U --> VS
+    VS <--> AR
+    AR <--> FA
+    FA <--> TG
+    FA <--> IOS
+    FA --> APNS
+    APNS --> IOS
+    U <--> TG
+    U <--> IOS
+    IDP <--> FA
+
+    note1[Source runtime remains authority for agent state and permissions]
+    note2[Far Away observes attention and permits only bounded correlated responses]
+    AR --- note1
+    FA --- note2

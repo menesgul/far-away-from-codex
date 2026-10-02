@@ -1,0 +1,52 @@
+flowchart LR
+    subgraph T0[TB0 — Source Authority Boundary]
+      S[Agent Runtime]
+      SR[SourceRequestRef]
+    end
+
+    subgraph T1[TB1 — Trusted Local OS User Boundary]
+      A[AgentAdapter]
+      C[Local Companion]
+      DB[(SQLite)]
+      KS[OS Secure Store]
+      V[VS Code UI Client]
+    end
+
+    subgraph T2[TB2 — Far Away Cloud Boundary]
+      E[Public Edge / Mobile API]
+      D[Installation Relay DO]
+      CP[(Control Plane)]
+    end
+
+    subgraph T3[TB3 — Third-party Delivery Boundary]
+      TG[Telegram]
+      AP[APNs / ActivityKit]
+    end
+
+    subgraph T4[TB4 — Paired Mobile Device Boundary]
+      IOS[iOS App]
+      DK[MobileDevice private key]
+      AA[App Attest key]
+      OS[Lock Screen / Notification UI]
+    end
+
+    S <--> A
+    A <--> C
+    C <--> DB
+    C <--> KS
+    V <--> C
+
+    C <-->|authenticated outbound relay<br/>sanitized projection / exact intent| D
+    D <--> E
+    E <--> CP
+
+    E <--> TG
+    E --> AP
+    AP --> OS
+    OS <--> IOS
+    IOS <-->|authenticated Mobile API<br/>signed exact authorization| E
+    IOS <--> DK
+    IOS <--> AA
+
+    AUTH[Canonical source authorization<br/>always terminates at Companion revalidation]
+    C --- AUTH

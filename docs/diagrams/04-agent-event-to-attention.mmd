@@ -1,0 +1,32 @@
+flowchart LR
+    SRC[Agent Runtime Event]
+    AD[AgentAdapter Observation]
+    N[Normalize canonical state]
+    PI[PendingInteraction]
+    AE[Immutable AttentionEvent]
+    D4[D4 semantic evidence-gap detector]
+    POL[D3 EffectiveAttentionPolicy]
+    D1[D1 Router]
+    D2[D2 Escalation Tracker]
+    D5[D5 Cross-Agent Inbox]
+    LOCAL[Local Desktop]
+    CLOUD[Cloud Relay]
+    TG[Telegram]
+    IOS[iOS / APNs / Live Activity]
+
+    SRC --> AD --> N
+    N --> PI
+    N --> AE
+    N --> D4
+    D4 -->|DERIVED only when evidence contract allows| AE
+    AE --> D1
+    POL --> D1
+    PI --> D1
+    D1 --> LOCAL
+    D1 --> CLOUD
+    D1 --> D2
+    D1 --> D5
+    D2 --> D5
+    D2 --> CLOUD
+    CLOUD --> TG
+    CLOUD --> IOS

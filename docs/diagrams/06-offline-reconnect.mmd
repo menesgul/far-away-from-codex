@@ -1,0 +1,24 @@
+flowchart TD
+    E[Connection / process interruption] --> Q{What was interrupted?}
+
+    Q -->|Companion restart| R1[Load persisted state as non-authoritative]
+    R1 --> R2[Rediscover runtimes/sessions]
+    R2 --> R3[Re-establish adapter authority binding + new generation]
+    R3 --> R4[Revalidate pending interactions]
+    R4 --> LIVE[Resume observation/routing]
+
+    Q -->|Cloud relay offline| C1[Keep local monitoring + canonical state]
+    C1 --> C2[Persist bounded durable outbox]
+    C2 --> C3[Reconnect authenticated WSS]
+    C3 --> C4[hello / negotiate / fresh relayConnectionId]
+    C4 --> C5[Replay eligible unexpired delivery state]
+    C5 --> LIVE
+
+    Q -->|Phone/Telegram action while Companion unreachable| O1[Cloud may retain bounded sanitized action intent until expiry]
+    O1 --> O2{Companion reconnects before expiry?}
+    O2 -- No --> O3[Expire / show stale]
+    O2 -- Yes --> O4[Route intent]
+    O4 --> O5[Companion full canonical revalidation]
+    O5 --> O6{Still current and allowed?}
+    O6 -- No --> O7[Reject stale/expired/wrong authority]
+    O6 -- Yes --> O8[Resolve under C4 idempotency]

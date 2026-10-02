@@ -1,0 +1,57 @@
+flowchart LR
+    subgraph Sources[Local Coding Agent Runtimes]
+      A1[OpenCode]
+      A2[Claude Code]
+      A3[Codex]
+      A4[Qwen Code]
+      AX[Other supported runtimes]
+    end
+
+    subgraph Companion[Local Companion — single local authority]
+      AM[Adapter Manager]
+      DISC[Discovery Ports]
+      OBS[Observation Ports]
+      RES[Resolution Ports]
+      DOM[Canonical Domain State]
+      ROUTE[D1 Router]
+      ESC[D2 Escalation]
+      POLICY[D3 Policy Engine]
+      SYN[D4 Synthetic Attention]
+      INBOX[D5 Inbox Projection]
+      DB[(SQLite WAL)]
+      OUT[Durable Outbox]
+      RELAY[Cloud Relay Client]
+      IPC[Local IPC Server]
+      SEC[Identity / Secure Store]
+    end
+
+    VSC[VS Code Extension]
+    CLOUD[Far Away Cloud]
+
+    A1 & A2 & A3 & A4 & AX --> DISC
+    A1 & A2 & A3 & A4 & AX --> OBS
+    RES --> A1 & A2 & A3 & A4 & AX
+
+    DISC --> AM
+    OBS --> AM
+    AM --> DOM
+    DOM --> ROUTE
+    DOM --> SYN
+    POLICY --> ROUTE
+    ROUTE --> ESC
+    ROUTE --> INBOX
+    SYN --> ROUTE
+    ESC --> INBOX
+
+    DOM <--> DB
+    INBOX <--> DB
+    OUT <--> DB
+    ROUTE --> OUT
+    OUT --> RELAY
+    RELAY <--> CLOUD
+
+    VSC <--> IPC
+    IPC <--> DOM
+    SEC --> RELAY
+    SEC --> IPC
+    DOM --> RES

@@ -1,0 +1,27 @@
+sequenceDiagram
+    participant C as Local Companion
+    participant DO as Installation Relay DO
+    participant W as Public Edge Worker
+    participant T as Telegram
+    participant U as User
+
+    C->>DO: outbound authenticated WSS
+    C->>DO: sanitized Attention projection
+    DO->>W: route notification projection
+    W->>T: send message / opaque callback buttons
+    T->>U: NEEDS YOU / OUTCOME / progress
+
+    U->>T: bounded callback
+    T->>W: webhook + opaque fa:a:token
+    W->>W: validate webhook + paired private user/chat
+    W->>DO: mapped exact bounded action intent
+    DO->>C: action.intent
+    C-->>DO: action.received
+    C->>C: canonical revalidation
+    C->>C: ResolutionPort if permitted
+    C-->>DO: action.result
+    DO-->>W: result projection
+    W-->>T: update message
+    T-->>U: canonical result
+
+    Note over W,C: High-risk: notification/local confirmation only
