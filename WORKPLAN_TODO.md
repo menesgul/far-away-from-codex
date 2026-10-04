@@ -72,8 +72,9 @@ Preserve all of the following:
 - no local TCP/HTTP/WebSocket listener exists.
 - the protocol is versioned, length-delimited JSON.
 - protocol incompatibility fails closed.
-- OS-user access control is part of the local IPC boundary.
-- authenticated session/challenge design is required by the locked architecture, but M0.7 must implement only the smallest local challenge/session mechanism justified by the current boundary; it must not invent B5 InstallationIdentity, OAuth, relay credentials, or P-256 enrollment.
+- OS-user access control is part of the local IPC boundary and is the authentication boundary for which local OS principals may connect.
+- M0.7 uses **OS-authenticated transport + protocol session establishment**. The protocol challenge/nonce and session identifier provide freshness, negotiation/session binding, and replay isolation; they are not standalone client authentication and must never be described as such.
+- M0.7 must not invent B5 InstallationIdentity, OAuth, relay credentials, P-256 enrollment, or a shared secret in the data directory.
 - multiple local transport clients may connect to the same Companion without becoming authorities.
 - VS Code remains UI/setup/bootstrap only; M0.7 does not implement `CompanionClient`.
 - no generic `sendPrompt`, `executeCommand`, arbitrary method, shell, agent command, or source-resolution endpoint may exist.
@@ -99,7 +100,9 @@ Required transport semantics:
 - reject startup if the selected local endpoint cannot be bound safely;
 - Unix stale socket cleanup is allowed only after Companion ownership for that data root is held; never unlink an endpoint that may belong to another live authority;
 - Unix socket permissions must be restricted to the owning OS user where Node/platform support permits;
-- Windows Named Pipe must use the narrowest practical per-user access semantics available through the chosen documented Node/OS mechanism. If Node's supported API cannot prove the required OS-user ACL without pulling B5/installer work forward, stop and report the concrete GAP rather than claiming authentication from pipe naming alone;
+- Windows Named Pipe must be created with an explicit protected Windows security descriptor/DACL that grants the intended current user/logon principal access and does not rely on the default Named Pipe security descriptor. The implementation may introduce the smallest narrowly scoped native Windows security boundary required to call documented Windows Named Pipe/security APIs. That native boundary owns only secure pipe creation/access control; it must not own Far Away protocol, domain, Companion lifecycle, agent, cloud, or identity logic;
+- do not use Node/libuv private or undocumented internals as the security boundary;
+- Unix Domain Socket access must be restricted to the owning user with mode `0600` after bind (and the containing Far Away data root remains per-user);
 - closing the IPC server must stop accepting new clients and clean up the endpoint without releasing M0.6 process ownership prematurely.
 
 Do not use the IPC endpoint as the M0.6 single-instance primitive.
@@ -147,23 +150,23 @@ Required semantics:
 
 Do not add generic RPC method names or a generic command envelope that future code could use to bypass the explicit allowlist.
 
-### 4. Minimal local challenge/session authentication
+### 4. OS-authenticated transport + protocol session establishment
 
 After transport connection, establish a connection-local challenge as part of `hello`.
 
-M0.7 goal is to prevent an unauthenticated arbitrary local byte stream from being treated as an established Far Away IPC session while staying inside the locked local boundary.
+M0.7 separates two responsibilities: the OS transport boundary determines which local principal may connect; the protocol handshake establishes a fresh negotiated Far Away session on an already OS-authorized connection. A challenge echo by itself is **not** authentication.
 
 Requirements:
 
-- Companion generates a fresh unpredictable challenge/nonce per connection;
+- Companion generates a fresh unpredictable challenge/nonce per OS-authorized connection;
 - the successful `hello` exchange must bind the negotiated protocol and a fresh connection/session identifier to that challenge;
-- no non-`hello` request is accepted before the connection reaches authenticated/established state;
+- no non-`hello` request is accepted before the connection reaches protocol-established state;
 - session/challenge values are connection-local, short-lived runtime material and are never InstallationIdentity, relay credentials, or source authority;
 - reconnect creates a new challenge/session; old connection material cannot be replayed as a current session;
 - do not persist session/challenge values in SQLite;
 - do not expose cloud/relay credentials to local clients.
 
-If the locked requirement for authenticated local IPC cannot be satisfied meaningfully without a secure client credential or OS facility that belongs to a later slice, **stop and report the GAP** rather than implementing security theater. Do not invent a shared secret in the data directory.
+Windows must obtain the required access-control guarantee from documented Windows security primitives (explicit Named Pipe security descriptor/DACL), and Unix from UDS filesystem permissions. The challenge/session layer must not be presented as a substitute for that OS authentication boundary. Do not invent a shared secret in the data directory.
 
 ### 5. Minimal read-only request behavior
 
@@ -205,6 +208,8 @@ M0.8 will add the actual VS Code client. Do not modify VS Code application behav
 Add deterministic focused tests covering at least:
 
 - Windows endpoint policy produces a Named Pipe and never a TCP endpoint;
+- Windows secure pipe creation applies an explicit protected DACL for the intended current user/logon principal and does not fall back to the default Named Pipe security descriptor;
+- Unix real-transport coverage verifies the UDS is restricted to mode `0600` where supported;
 - Unix endpoint policy produces a UDS inside a temp data root;
 - Unix stale endpoint handling is safe and occurs only under Companion ownership;
 - frame encode/decode uses UTF-8 byte length;
@@ -217,7 +222,7 @@ Add deterministic focused tests covering at least:
 - incompatible major version fails closed;
 - unknown message type is rejected without generic dispatch;
 - duplicate in-flight request ID rejection;
-- fresh challenge/session material per connection and reconnect;
+- fresh protocol challenge/session material per OS-authorized connection and reconnect;
 - stale/replayed connection material is not accepted as a current session;
 - `health.get` returns only bounded local health;
 - `companion.status` returns only bounded Companion/runtime metadata;
@@ -279,7 +284,8 @@ Review questions:
 - Is Companion still the sole owner of the IPC server and canonical local runtime?
 - Is VS Code still only a future client rather than runtime authority?
 - Is the transport exclusively Named Pipe / UDS with no local TCP?
-- Does every connection fail closed until protocol negotiation and the required local authentication boundary are satisfied?
+- Does Windows enforce the intended local principal boundary with an explicit protected Named Pipe DACL and Unix with UDS permissions before protocol session establishment?
+- Is the challenge/session mechanism correctly described as protocol freshness/session binding rather than standalone client authentication?
 - Can malformed/incompatible clients affect only themselves rather than Companion/other clients?
 - Does IPC expose only the explicit M0.7 read-only allowlist?
 - Can any IPC message be interpreted as a generic agent/source command?
@@ -295,12 +301,12 @@ M0.7 is complete only when:
 
 - [ ] Windows endpoint policy is Named Pipe and Unix endpoint policy is UDS;
 - [ ] no local TCP/HTTP/WebSocket listener exists;
-- [ ] local endpoint access is restricted to the owning OS-user boundary where the supported platform API permits, with any unresolved ACL limitation explicitly surfaced rather than hidden;
+- [ ] Windows Named Pipe creation uses an explicit protected DACL for the intended current user/logon principal rather than the default descriptor, and Unix UDS access is restricted to mode `0600` where supported;
 - [ ] framing is 4-byte big-endian length-prefixed UTF-8 JSON with a 64 KiB maximum;
 - [ ] fragmented/coalesced frames parse correctly and malformed frames fail closed per client;
 - [ ] concrete protocol-v1 contracts contain only `hello`, `health.get`, `companion.status`, and bounded responses/errors;
 - [ ] `hello` is mandatory and incompatible protocol versions fail closed;
-- [ ] fresh per-connection challenge/session material exists and reconnect invalidates old connection material;
+- [ ] fresh per-connection protocol challenge/session material exists, reconnect invalidates old connection material, and this mechanism is not claimed as standalone client authentication;
 - [ ] no shared secret, InstallationIdentity, relay credential, or source authority is invented for IPC;
 - [ ] `health.get` and `companion.status` are read-only and bounded;
 - [ ] multiple local transport clients can coexist without becoming authorities;
@@ -321,6 +327,7 @@ apps/companion/src/**
 apps/companion/test/**
 packages/contracts/src/**
 packages/contracts/test/**          # if contract-focused tests are justified
+packages/windows-ipc-security/**     # only if used for the narrow documented Windows DACL/native boundary
 package.json / package-lock.json    # only if genuinely required
 WORKPLAN_TODO.md                    # Completion Evidence only during execution
 ```
@@ -334,7 +341,7 @@ Stop and report instead of improvising if:
 - local checkout does not descend from merged M0.6 checkpoint `e29dd858b998fe2f5d319aadcb67b774a1c8e568`;
 - unrelated local changes are present;
 - a proposed implementation requires local TCP/HTTP/WebSocket;
-- Named Pipe/UDS cannot satisfy the locked OS-user access-control requirement with the currently supported runtime/platform APIs and no meaningful authenticated-session mechanism can be implemented without pulling B5/installer/secure-store work forward;
+- the documented Windows security APIs cannot provide the required explicit per-user/logon-principal Named Pipe DACL through a narrowly scoped native boundary, or Unix cannot enforce the required UDS owner permissions;
 - implementation would require a generic RPC/command surface;
 - VS Code must be modified to make the protocol work;
 - IPC would open before M0.6 ownership/storage bootstrap;
@@ -352,7 +359,7 @@ When execution finishes, update only this section with factual evidence:
 - verified starting branch/SHA and clean working tree;
 - files changed;
 - endpoint/transport behavior;
-- OS-user access-control behavior and any platform limitation;
+- OS-user access-control behavior, including Windows DACL/Unix UDS permission evidence, and any platform limitation;
 - framing behavior and limits;
 - protocol negotiation/error behavior;
 - challenge/session behavior;
