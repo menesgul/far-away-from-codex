@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { CompanionOwnership, type ProbeLiveness } from './ownership.js';
-import { createDataRoot, resolveCompanionPaths, type PathEnvironment } from './paths.js';
+import { createDataRoot, resolveCompanionPaths, type CompanionPaths, type PathEnvironment } from './paths.js';
 import { runMigrations, type Migration } from './migrations.js';
 
 export interface StorageOptions {
@@ -14,6 +14,7 @@ export interface StorageOptions {
 export class CompanionStorage {
   private ownership?: CompanionOwnership;
   private database?: DatabaseSync;
+  private resolvedPaths?: CompanionPaths;
   private stopped = false;
 
   private constructor(private readonly options: StorageOptions) {}
@@ -22,6 +23,7 @@ export class CompanionStorage {
     const storage = new CompanionStorage(options);
     try {
       const paths = resolveCompanionPaths(options.paths);
+      storage.resolvedPaths = paths;
       await createDataRoot(paths, options.paths?.platform);
       storage.ownership = await CompanionOwnership.acquire(paths, options.probeLiveness);
       options.onResourceEvent?.('ownership-acquired');
@@ -61,5 +63,12 @@ export class CompanionStorage {
       this.options.onResourceEvent?.('ownership-released');
     }
     this.stopped = true;
+  }
+
+  async assertOwnershipHeld(): Promise<void> {
+    if (!this.database || !this.ownership || !this.resolvedPaths || this.stopped) {
+      throw new Error('Companion storage is not bootstrapped and owned');
+    }
+    await this.ownership.assertHeld(this.resolvedPaths.ownership);
   }
 }

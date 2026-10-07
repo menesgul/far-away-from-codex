@@ -2,44 +2,47 @@
 
 > **Current milestone:** M0 — Repository & Runtime Foundation
 >
-> **Current step:** M0.6 — Add Companion Paths, SQLite Bootstrap & Single-Instance Ownership
+> **Current step:** M0.7 — Implement Minimal Local IPC Protocol
 >
-> Implement **only this step**. Do not begin M0.7 or any later work.
+> Implement **only this step**. Do not begin M0.8 or any later work.
 
 ## Why this step exists
 
-M0.5 established a real standalone Companion process. M0.6 gives that process the minimum durable local foundation required before IPC or agent work exists:
+M0.5 established the standalone Companion process and M0.6 established deterministic local paths, single-instance ownership, and the canonical SQLite lifecycle. M0.7 adds the first supported local client boundary around that Companion:
 
-- deterministic per-user local paths;
-- one canonical SQLite database owned by Companion;
-- WAL bootstrap plus a minimal migration mechanism;
-- exactly one authoritative Companion process for the selected local data/installation scope;
-- restart-safe startup/shutdown ordering.
+- a per-user local IPC server owned by Companion;
+- Windows Named Pipe / Unix Domain Socket transport, never TCP;
+- versioned length-delimited JSON framing;
+- minimal protocol-v1 negotiation and read-only health/status requests;
+- multiple transport clients may connect without becoming Companion authority.
 
-This slice establishes **local process and persistence ownership**, not agent/source authority. Persisted state never proves live source authority.
+This slice proves the Companion can expose a narrow local control/diagnostic boundary. It does **not** yet add the VS Code CompanionClient, extension activation/bootstrap, agent operations, or remote/cloud actions.
 
 ## Verified starting state
 
 Authoritative merged checkpoint on `main`:
 
-`0be1bc51293311d14300ea6787e3fdcb1f952d7c`
+`e29dd858b998fe2f5d319aadcb67b774a1c8e568`
 
 Merge message:
 
-`Merge pull request #3 from menesgul/planning/m0.5-companion`
+`Merge pull request #4 from menesgul/planning/m0.6-persistence`
 
 At this checkpoint:
 
-- M0.1–M0.5 are marked complete in `WORKPLAN.md`;
-- `apps/companion` is a private Node >=22 TypeScript workspace;
-- the built Companion launches independently, reaches READY, remains alive, and shuts down through the M0.5 lifecycle;
-- root has the six expected workspaces and one canonical lockfile;
-- no Companion persistence, path policy, single-instance ownership, IPC, adapter execution, relay, or identity implementation exists;
-- reviewed M0.5 regression evidence is Companion 4 passing / 2 Windows signal skips, VS Code 92 passing on 1.138.0, Cloud 73 passing across 6 files, and aggregate validation green.
+- M0.1–M0.6 are marked complete in `WORKPLAN.md`;
+- the repository has six workspaces and one canonical root lockfile;
+- `apps/companion` is a standalone Node >=22.17 TypeScript process;
+- Companion acquires one local ownership claim before opening its canonical SQLite database;
+- SQLite WAL/migrations and restart-safe cleanup are green;
+- Companion reaches READY independently of VS Code;
+- `packages/contracts` currently contains only `ProtocolVersion` and JSON wire vocabulary; concrete IPC messages do not yet exist;
+- no Named Pipe/UDS server, local TCP server, IPC framing, negotiation, challenge/session authentication, or VS Code CompanionClient exists;
+- reviewed M0.6 regression evidence is Companion 21 passing / 2 documented Windows signal skips, VS Code 92 passing on 1.138.0, Cloud 73 passing across 6 files, and aggregate validation green.
 
 Planning branch:
 
-`planning/m0.6-persistence`
+`planning/m0.7-ipc`
 
 Before implementation, verify the local checkout is based on this branch/checkpoint, is up to date, and has no unrelated working-tree changes. Otherwise stop and report.
 
@@ -47,16 +50,15 @@ Before implementation, verify the local checkout is based on this branch/checkpo
 
 Read `ARCHITECTURE.md`, `WORKPLAN.md`, and this file before editing.
 
-M0.6 is derived from the locked A–E architecture baseline. The implementation-driving decisions are primarily **B1/B3** plus the Phase A authority boundary. Later C/D/E decisions remain constraints: this slice must not pull cloud relay, routing/policy, remote surfaces, or mobile authorization forward.
+M0.7 is derived primarily from locked **B3/B4/B5 local-boundary decisions** plus the Phase A product boundary. Later C/D/E decisions remain constraints only: local IPC must not become a generic agent controller, cloud relay, policy/action path, or remote source-resolution surface.
 
-The relevant canonical diagrams are **exactly these four**:
+The relevant canonical diagrams are **exactly these three**:
 
-1. `docs/diagrams/02-local-component.mmd` — Companion owns canonical local persistence and is the single local authority; SQLite is inside Companion/TB1.
-2. `docs/diagrams/06-offline-reconnect.mmd` — restart must treat persisted authority as non-authoritative; persistence cannot silently restore live source authority.
-3. `docs/diagrams/10-deployment-topology.mmd` — one per-user Companion process owns local SQLite inside the desktop account boundary.
-4. `docs/diagrams/11-trust-boundaries.mmd` — database and ownership state remain inside TB1; canonical source authorization still requires later Companion/source revalidation.
+1. `docs/diagrams/02-local-component.mmd` — Companion owns the Local IPC Server; VS Code is only a local client and does not become runtime authority.
+2. `docs/diagrams/10-deployment-topology.mmd` — VS Code ↔ Companion uses Named Pipe / UDS inside the desktop OS account boundary; no local TCP.
+3. `docs/diagrams/11-trust-boundaries.mmd` — local IPC remains inside TB1; it must not cross into cloud/provider/source authority.
 
-Do **not** require diagrams 01, 03–05, or 07–09 for this slice. M0.6 implements no agent integration, attention flow, permission round-trip, multi-device behavior, Telegram, or iOS.
+Do **not** require diagrams 01, 03–09 for this slice. M0.7 implements no agent integration, source permission round-trip, offline source revalidation, multi-device behavior, Telegram, cloud relay, or iOS.
 
 Diagrams clarify boundaries; explicit locked architecture text wins on conflict.
 
@@ -64,215 +66,257 @@ Diagrams clarify boundaries; explicit locked architecture text wins on conflict.
 
 Preserve all of the following:
 
-- Companion is the standalone per-user **single local Far Away authority**.
-- SQLite has one canonical writer: the authoritative Companion process.
-- SQLite uses WAL.
-- persisted state is not live source authority after restart.
-- Companion does not own coding-agent source sessions.
-- VS Code remains UI/setup/bootstrap only and is not involved in database ownership.
-- Cloud remains routing/control only.
-- no local TCP exists.
-- secrets/private keys do not belong in this SQLite foundation; OS secure-store work is later.
-- no generic remote prompt/command surface is introduced.
-- no M0.7 IPC mechanism is used as the singleton primitive.
+- Companion remains the standalone per-user **single local Far Away authority**.
+- Local IPC is owned by Companion, not VS Code.
+- Windows transport is a Named Pipe; Unix-like transport is a Unix Domain Socket.
+- no local TCP/HTTP/WebSocket listener exists.
+- the protocol is versioned, length-delimited JSON.
+- protocol incompatibility fails closed.
+- OS-user access control is part of the local IPC boundary and is the authentication boundary for which local OS principals may connect.
+- M0.7 uses **OS-authenticated transport + protocol session establishment**. The protocol challenge/nonce and session identifier provide freshness, negotiation/session binding, and replay isolation; they are not standalone client authentication and must never be described as such.
+- M0.7 must not invent B5 InstallationIdentity, OAuth, relay credentials, P-256 enrollment, or a shared secret in the data directory.
+- multiple local transport clients may connect to the same Companion without becoming authorities.
+- VS Code remains UI/setup/bootstrap only; M0.7 does not implement `CompanionClient`.
+- no generic `sendPrompt`, `executeCommand`, arbitrary method, shell, agent command, or source-resolution endpoint may exist.
+- IPC status never implies coding-agent/source authority.
+- SQLite remains the single canonical Companion database lifecycle from M0.6; IPC must not introduce another canonical writer.
 
 ## Exact scope
 
-### 1. Companion path policy
+### 1. Local endpoint policy and transport abstraction
 
-Add a small testable path resolver owned by `apps/companion`.
+Add a small testable Companion-owned local IPC transport abstraction.
 
-Default per-user data location:
+Endpoint policy:
 
-- Windows: `%LOCALAPPDATA%/Far Away`;
-- macOS: `~/Library/Application Support/Far Away`;
-- Linux/other Unix: `$XDG_DATA_HOME/far-away` when set, otherwise `~/.local/share/far-away`.
+- Windows: deterministic per-user Named Pipe name derived from the selected Companion data-root identity/path without embedding secrets;
+- macOS/Linux/other Unix: deterministic Unix Domain Socket path inside the selected Companion data root;
+- tests use explicit temporary roots/endpoints and never the real user Far Away directory.
 
-Within that root, define stable paths for at least:
+Required transport semantics:
 
-- canonical SQLite database;
-- single-instance ownership artifact.
+- bind/listen only after M0.6 ownership + SQLite bootstrap succeeds;
+- no TCP port and no HTTP/WebSocket server;
+- reject startup if the selected local endpoint cannot be bound safely;
+- Unix stale socket cleanup is allowed only after Companion ownership for that data root is held; never unlink an endpoint that may belong to another live authority;
+- Unix socket permissions must be restricted to the owning OS user where Node/platform support permits;
+- Windows Named Pipe must be created with an explicit protected Windows security descriptor/DACL that grants the intended current user/logon principal access and does not rely on the default Named Pipe security descriptor. The implementation may introduce the smallest narrowly scoped native Windows security boundary required to call documented Windows Named Pipe/security APIs. That native boundary owns only secure pipe creation/access control; it must not own Far Away protocol, domain, Companion lifecycle, agent, cloud, or identity logic;
+- do not use Node/libuv private or undocumented internals as the security boundary;
+- Unix Domain Socket access must be restricted to the owning user with mode `0600` after bind (and the containing Far Away data root remains per-user);
+- closing the IPC server must stop accepting new clients and clean up the endpoint without releasing M0.6 process ownership prematurely.
 
-Do not create cache/log/config trees that M0.6 does not use.
+Do not use the IPC endpoint as the M0.6 single-instance primitive.
 
-Tests must never write to the developer's real Far Away directory. Use dependency injection or a narrowly scoped explicit test override/temp root.
+### 2. Length-delimited JSON framing
 
-Path creation must fail closed with a useful error. On Unix-like systems request restrictive per-user directory permissions where Node supports it; do not invent custom Windows ACL management in this slice.
+Implement a deterministic streaming frame codec for local IPC.
 
-### 2. Single-instance ownership
-
-Acquire ownership **before opening/migrating the canonical database**.
-
-Use a filesystem-based, atomic ownership primitive inside the Companion data root. It must not use Named Pipe/UDS/TCP/HTTP/WebSocket.
-
-Required semantics:
-
-- exactly one process can own a given data root at a time;
-- a second live Companion fails startup non-zero and never reaches READY;
-- ownership records enough diagnostic metadata to identify at least PID and a unique owner token;
-- never steal ownership merely because a wall-clock timeout elapsed;
-- stale ownership may be reclaimed only when the recorded owner process is demonstrably not alive;
-- if liveness is ambiguous, fail closed rather than risk two authorities;
-- stale-reclaim races must still produce at most one winner;
-- only the process holding the matching owner token may release ownership;
-- graceful shutdown releases ownership;
-- startup failure after acquisition releases ownership;
-- crash-stale ownership can be recovered on a later start when dead-owner status is established.
-
-Do not deepen this into installation identity/B5 authentication. The owner token is local lock correlation, not an InstallationIdentity or credential.
-
-### 3. SQLite bootstrap
-
-After ownership is acquired:
-
-- open one canonical database for the Companion process;
-- enable and verify `journal_mode=WAL`;
-- enable `foreign_keys=ON`;
-- set a finite busy timeout suitable for local startup/migrations;
-- expose one owned database lifecycle so later code cannot casually create competing canonical writers;
-- close the database before releasing process ownership during graceful shutdown.
-
-Do not create domain/session/PendingInteraction/outbox tables yet.
-
-### 4. Migration mechanism
-
-Add the smallest deterministic migration runner needed for future Companion schema evolution.
+Use a fixed **4-byte unsigned big-endian length prefix** followed by exactly that many UTF-8 bytes containing one JSON value.
 
 Requirements:
 
-- ordered integer versions;
-- migration identity/name;
-- a canonical migration-history table;
-- each unapplied migration is applied transactionally;
-- already-applied migrations are not rerun;
-- duplicate/out-of-order/invalid migration definitions fail before partial application;
-- migration failure rolls back that migration and prevents READY;
-- database schema version/history survives close/reopen;
-- production M0.6 may have no product-domain migration beyond migration bookkeeping; tests may use temporary test migrations to prove the runner.
+- frame length counts UTF-8 bytes, not JavaScript characters;
+- parsing supports fragmented prefix/body reads and multiple frames in one read;
+- define a conservative maximum frame size of **64 KiB** for M0.7;
+- zero-length, oversized, truncated-at-EOF, invalid UTF-8, invalid JSON, and non-object top-level frames fail closed;
+- malformed input closes/rejects only that client connection and must not terminate Companion or other clients;
+- no newline-delimited or delimiter-scanning fallback;
+- outbound messages use the same codec.
 
-Do not design future domain schema speculatively.
+### 3. Protocol v1 contracts and envelope
 
-### 5. Runtime integration and ordering
+Extend `packages/contracts` with only the concrete local IPC v1 wire DTOs required by M0.7.
 
-Extend the M0.5 executable/runtime with explicit resource ownership. Equivalent structure is acceptable, but startup ordering must be:
+Every message must carry a protocol version and explicit message type. Keep DTOs JSON-only and separate from canonical domain types.
 
-`resolve/create paths → acquire single-instance ownership → open/configure SQLite → run migrations → READY`
+Protocol v1 request surface is exactly:
 
-Shutdown ordering must be:
+- `hello`
+- `health.get`
+- `companion.status`
 
-`STOPPING → close SQLite → release ownership → STOPPED → release executable lifetime hold`
+And corresponding bounded responses/errors.
 
-Failure at any intermediate startup step must unwind only resources already acquired, in reverse order, then exit non-zero without READY.
+Required semantics:
 
-Repeated/concurrent shutdown remains idempotent.
+- `hello` is mandatory before any other request;
+- client proposes its supported protocol range/version;
+- Companion selects a compatible v1 version or returns a protocol error and closes;
+- major-version incompatibility fails closed;
+- unknown message types fail closed for that request/connection and never dispatch arbitrary methods;
+- request IDs are opaque correlation values with a documented bounded string size; they are not authority tokens;
+- duplicate in-flight request IDs on one connection are rejected;
+- wire errors are typed and sanitized; no stack traces, filesystem secrets, database handles, source/vendor payloads, or raw exception objects cross IPC.
 
-Do not move signal handling into domain/contracts packages.
+Do not add generic RPC method names or a generic command envelope that future code could use to bypass the explicit allowlist.
+
+### 4. OS-authenticated transport + protocol session establishment
+
+After transport connection, establish a connection-local challenge as part of `hello`.
+
+M0.7 separates two responsibilities: the OS transport boundary determines which local principal may connect; the protocol handshake establishes a fresh negotiated Far Away session on an already OS-authorized connection. A challenge echo by itself is **not** authentication.
+
+Requirements:
+
+- Companion generates a fresh unpredictable challenge/nonce per OS-authorized connection;
+- the successful `hello` exchange must bind the negotiated protocol and a fresh connection/session identifier to that challenge;
+- no non-`hello` request is accepted before the connection reaches protocol-established state;
+- session/challenge values are connection-local, short-lived runtime material and are never InstallationIdentity, relay credentials, or source authority;
+- reconnect creates a new challenge/session; old connection material cannot be replayed as a current session;
+- do not persist session/challenge values in SQLite;
+- do not expose cloud/relay credentials to local clients.
+
+Windows must obtain the required access-control guarantee from documented Windows security primitives (explicit Named Pipe security descriptor/DACL), and Unix from UDS filesystem permissions. The challenge/session layer must not be presented as a substitute for that OS authentication boundary. Do not invent a shared secret in the data directory.
+
+### 5. Minimal read-only request behavior
+
+Implement only:
+
+`health.get`
+- proves the Companion IPC service is responsive;
+- returns bounded process/runtime health information only;
+- must not claim agent/source health or authority.
+
+`companion.status`
+- returns the Companion runtime state and minimal protocol/runtime metadata needed by future local clients;
+- must not expose canonical DB internals, source sessions, PendingInteraction data, relay credentials, filesystem secrets, or vendor payloads.
+
+Both requests are read-only. They must not mutate canonical state or SQLite.
+
+### 6. Runtime integration and ordering
+
+Extend the M0.6 executable lifecycle so startup is:
+
+`paths/ownership → SQLite/migrations → local IPC bind/listen → READY`
+
+Shutdown is:
+
+`STOPPING → stop accepting IPC → close active IPC connections → close SQLite → release ownership → STOPPED → release executable lifetime hold`
+
+Requirements:
+
+- if IPC bind/start fails, unwind IPC resources if any, then SQLite, then ownership; never reach READY;
+- IPC client disconnect must not stop Companion;
+- malformed/failed client must not affect other clients;
+- multiple simultaneous clients are allowed at the transport/protocol layer;
+- repeated/concurrent Companion shutdown remains idempotent.
+
+M0.8 will add the actual VS Code client. Do not modify VS Code application behavior in M0.7.
 
 ## Tests required
 
 Add deterministic focused tests covering at least:
 
-- path resolution for Windows/macOS/Linux rules without touching real user directories;
-- data-root creation in a temp location;
-- first ownership acquisition succeeds;
-- a competing owner for the same root is rejected;
-- wrong owner token cannot release another owner's lock;
-- dead/stale ownership is reclaimable;
-- ambiguous/live ownership is not stolen;
-- SQLite opens under the temp root with WAL verified and foreign keys enabled;
-- migration history persists across close/reopen;
-- applied migrations are not rerun;
-- migration failure rolls back and prevents successful bootstrap;
-- startup failure after ownership acquisition releases owned resources;
-- graceful shutdown closes DB and releases ownership;
-- a subsequent Companion using the same temp root can start after graceful shutdown;
-- a real spawned second Companion using the same temp root cannot reach READY while the first is alive.
+- Windows endpoint policy produces a Named Pipe and never a TCP endpoint;
+- Windows secure pipe creation applies an explicit protected DACL for the intended current user/logon principal and does not fall back to the default Named Pipe security descriptor;
+- Unix real-transport coverage verifies the UDS is restricted to mode `0600` where supported;
+- Unix endpoint policy produces a UDS inside a temp data root;
+- Unix stale endpoint handling is safe and occurs only under Companion ownership;
+- frame encode/decode uses UTF-8 byte length;
+- fragmented prefix/body parsing;
+- multiple frames in one chunk;
+- zero/oversized/truncated/invalid-UTF8/invalid-JSON/non-object frames fail closed;
+- one malformed client does not terminate the IPC server or another healthy client;
+- `hello` is required before every non-hello request;
+- compatible v1 negotiation succeeds;
+- incompatible major version fails closed;
+- unknown message type is rejected without generic dispatch;
+- duplicate in-flight request ID rejection;
+- fresh protocol challenge/session material per OS-authorized connection and reconnect;
+- stale/replayed connection material is not accepted as a current session;
+- `health.get` returns only bounded local health;
+- `companion.status` returns only bounded Companion/runtime metadata;
+- neither read-only request writes to SQLite/canonical state;
+- server bind occurs only after M0.6 storage ownership/bootstrap;
+- IPC startup failure prevents READY and unwinds storage/ownership;
+- shutdown closes IPC before SQLite/ownership;
+- at least two real local transport clients can connect concurrently to one Companion and independently complete `hello` + read-only requests;
+- disconnecting one client leaves the other client and Companion alive.
 
-Prefer injectable process-liveness/path dependencies for deterministic unit tests. Spawned-process coverage should prove the real executable boundary where practical. Timeouts may bound failure, but must not be the success synchronization mechanism.
+Where platform-specific transport tests cannot execute on the current OS, keep pure endpoint-policy tests cross-platform and explicitly document skipped real-transport coverage. Do not fake a TCP transport for portability.
 
-Preserve the documented Windows signal-test limitation from M0.5; do not broaden this slice to solve it.
+Preserve the two documented Windows signal-test skips from M0.5/M0.6; do not solve them in this slice unless required by IPC shutdown correctness.
 
 ## Root/regression contract
 
-M0.6 should remain inside `apps/companion/**` unless a root script/lockfile change is genuinely required by an added dependency.
+M0.7 should be dominated by `apps/companion/**` and `packages/contracts/**`. Root/lockfile edits are allowed only for a justified dependency or orchestration change.
 
 Run:
 
 1. clean root `npm ci`;
 2. verify all six workspaces;
 3. Companion build/typecheck/tests;
-4. all M0.4 package typechecks;
+4. domain/contracts/adapter-sdk typechecks;
 5. VS Code compile/lint/**92 tests on VS Code 1.138.0**;
 6. Cloud typecheck/**73 tests across 6 files**;
 7. aggregate root `npm run validate`;
 8. `git diff --check`.
 
-No existing VS Code/Cloud/package test may be deleted, skipped, or weakened to pass M0.6.
+No existing VS Code/Cloud/package test may be deleted, skipped, or weakened to pass M0.7.
 
-## Explicitly forbidden in M0.6
+## Explicitly forbidden in M0.7
 
 Do **not** implement:
 
-- Named Pipe or Unix Domain Socket server/client;
-- any local TCP/HTTP/WebSocket transport;
-- `hello`, `health.get`, `companion.status`, framing, negotiation, IPC auth/challenge;
-- VS Code `CompanionClient` or extension activation/bootstrap changes;
-- agent manager, concrete/fake production adapters, discovery/observation/resolution;
-- canonical AgentSession/PendingInteraction persistence;
-- immutable AttentionEvent/outbox production schema;
-- D1 routing, D2 escalation, D3 policy, D4 synthetic attention, D5 inbox;
+- VS Code `CompanionClient`, activation, bootstrap, status bar, view, walkthrough, or extension behavior changes;
+- local TCP, HTTP, WebSocket, gRPC, Electron IPC, or stdio as the production transport;
+- generic RPC/command/prompt/shell/agent-control endpoints;
+- agent manager, production/fake agent adapters, discovery/observation/resolution;
+- AgentSession/PendingInteraction/AttentionEvent/outbox production persistence;
+- source request resolution or permission round-trip;
 - Companion ↔ cloud relay;
 - Telegram behavior changes;
-- account/OAuth, InstallationIdentity, P-256/ES256, secure-store enrollment;
+- account/OAuth/InstallationIdentity/P-256/secure-store enrollment;
+- D1 routing, D2 escalation, D3 policy, D4 synthetic attention, D5 inbox;
 - iOS/APNs/Live Activity/Dynamic Island;
-- generic prompt/command execution.
-
-Do not use M0.7 IPC as a shortcut for single-instance ownership.
+- changes to canonical diagrams or `ARCHITECTURE.md`.
 
 ## Relevant diagrams — MUST REVIEW
 
 Before implementation and again during final self-review:
 
-- [ ] `docs/diagrams/02-local-component.mmd`
-- [ ] `docs/diagrams/06-offline-reconnect.mmd`
-- [ ] `docs/diagrams/10-deployment-topology.mmd`
-- [ ] `docs/diagrams/11-trust-boundaries.mmd`
+- [x] `docs/diagrams/02-local-component.mmd`
+- [x] `docs/diagrams/10-deployment-topology.mmd`
+- [x] `docs/diagrams/11-trust-boundaries.mmd`
 
 Review questions:
 
-- Is there still exactly one canonical local Companion writer/authority per selected data root?
-- Can a second live process ever reach READY against the same canonical DB?
-- Does persisted state remain non-authoritative with respect to future source authority?
-- Are SQLite and ownership artifacts entirely inside TB1?
-- Is VS Code uninvolved in DB/lock ownership?
-- Was any IPC/relay/adapter/identity responsibility pulled forward?
-- On startup failure, are acquired resources unwound before process exit?
-- On shutdown, is SQLite closed before ownership is released?
+- Is Companion still the sole owner of the IPC server and canonical local runtime?
+- Is VS Code still only a future client rather than runtime authority?
+- Is the transport exclusively Named Pipe / UDS with no local TCP?
+- Does Windows enforce the intended local principal boundary with an explicit protected Named Pipe DACL and Unix with UDS permissions before protocol session establishment?
+- Is the challenge/session mechanism correctly described as protocol freshness/session binding rather than standalone client authentication?
+- Can malformed/incompatible clients affect only themselves rather than Companion/other clients?
+- Does IPC expose only the explicit M0.7 read-only allowlist?
+- Can any IPC message be interpreted as a generic agent/source command?
+- Are challenge/session values clearly distinct from InstallationIdentity, relay credentials, and source authority?
+- Does shutdown close IPC before SQLite/ownership?
+- Did any M0.8+ responsibility get pulled forward?
 
 Any NO/unclear answer is a review finding.
 
 ## Acceptance criteria
 
-M0.6 is complete only when:
+M0.7 is complete only when:
 
-- [x] platform-aware per-user Companion data paths are deterministic and tested;
-- [x] tests do not touch the real user data directory;
-- [x] exactly one live Companion can own a selected data root;
-- [x] a competing Companion fails closed and never reaches READY;
-- [x] stale dead-owner state can be safely reclaimed without time-based lock stealing;
-- [x] ownership release is token-checked and idempotent;
-- [x] canonical SQLite opens only after ownership acquisition;
-- [x] SQLite WAL and foreign-key enforcement are verified;
-- [x] one canonical DB lifecycle/writer is owned by Companion;
-- [x] ordered transactional migrations and persistent migration history work;
-- [x] failed migration/bootstrap prevents READY and unwinds ownership/database resources;
-- [x] graceful shutdown closes SQLite before releasing ownership;
-- [x] restart against the same data root succeeds after clean shutdown;
-- [x] no persisted data is treated as live agent/source authority;
-- [x] existing M0.5 lifecycle semantics remain intact;
+- [x] Windows endpoint policy is Named Pipe and Unix endpoint policy is UDS;
+- [x] no local TCP/HTTP/WebSocket listener exists;
+- [x] Windows Named Pipe creation uses an explicit protected DACL for the intended current user/logon principal rather than the default descriptor, and Unix UDS access is restricted to mode `0600` where supported;
+- [x] framing is 4-byte big-endian length-prefixed UTF-8 JSON with a 64 KiB maximum;
+- [x] fragmented/coalesced frames parse correctly and malformed frames fail closed per client;
+- [x] concrete protocol-v1 contracts contain only `hello`, `health.get`, `companion.status`, and bounded responses/errors;
+- [x] `hello` is mandatory and incompatible protocol versions fail closed;
+- [x] fresh per-connection protocol challenge/session material exists, reconnect invalidates old connection material, and this mechanism is not claimed as standalone client authentication;
+- [x] no shared secret, InstallationIdentity, relay credential, or source authority is invented for IPC;
+- [x] `health.get` and `companion.status` are read-only and bounded;
+- [x] multiple local transport clients can coexist without becoming authorities;
+- [x] one malformed/disconnected client does not terminate Companion or another client;
+- [x] IPC binds only after M0.6 storage bootstrap and closes before SQLite/ownership;
+- [x] IPC startup failure prevents READY and unwinds acquired resources;
+- [x] M0.5/M0.6 lifecycle and persistence semantics remain intact;
 - [x] clean install and full regression gates pass;
-- [x] implementation conforms to diagrams 02, 06, 10, and 11;
-- [x] no M0.7 IPC or later feature work has begun.
+- [x] implementation conforms to diagrams 02, 10, and 11;
+- [x] no M0.8 VS Code client or later feature work has begun.
 
 ## Expected change shape
 
@@ -281,41 +325,49 @@ A conforming diff should be dominated by:
 ```text
 apps/companion/src/**
 apps/companion/test/**
-apps/companion/package.json        # only if a real dependency is justified
-package-lock.json                  # only if dependency metadata changes
-WORKPLAN_TODO.md                   # Completion Evidence only during execution
+packages/contracts/src/**
+packages/contracts/test/**          # if contract-focused tests are justified
+packages/windows-ipc-security/**     # only if used for the narrow documented Windows DACL/native boundary
+package.json / package-lock.json    # only if genuinely required
+WORKPLAN_TODO.md                    # Completion Evidence only during execution
 ```
 
-Unexpected edits to `apps/vscode/**`, `apps/cloud/**`, `packages/**`, diagrams, or `ARCHITECTURE.md` require explanation and normally indicate scope drift.
+Unexpected edits to `apps/vscode/**`, `apps/cloud/**`, `packages/domain/**`, `packages/agent-adapter-sdk/**`, diagrams, or `ARCHITECTURE.md` require explanation and normally indicate scope drift.
 
 ## Stop conditions
 
 Stop and report instead of improvising if:
 
-- local checkout does not descend from merged M0.5;
+- local checkout does not descend from merged M0.6 checkpoint `e29dd858b998fe2f5d319aadcb67b774a1c8e568`;
 - unrelated local changes are present;
-- single-instance correctness appears to require IPC/network transport;
-- a proposed stale-lock strategy can steal ownership from a process that may still be alive;
-- SQLite would have multiple canonical writers;
-- implementation requires defining future domain/session/outbox schema;
-- VS Code/Cloud must become involved in local persistence ownership;
-- a locked A–E architecture invariant or one of diagrams 02/06/10/11 conflicts with the slice.
+- a proposed implementation requires local TCP/HTTP/WebSocket;
+- the documented Windows security APIs cannot provide the required explicit per-user/logon-principal Named Pipe DACL through a narrowly scoped native boundary, or Unix cannot enforce the required UDS owner permissions;
+- implementation would require a generic RPC/command surface;
+- VS Code must be modified to make the protocol work;
+- IPC would open before M0.6 ownership/storage bootstrap;
+- IPC lifecycle would outlive or compete with the authoritative Companion lifecycle;
+- SQLite would gain another canonical writer;
+- implementation requires agent/session/source-resolution state;
+- a locked A–E architecture invariant or diagram 02/10/11 conflicts with the slice.
 
 ## Completion Evidence
 
-**Status:** IMPLEMENTED; regression gate green; awaiting independent review.
+**Status:** COMPLETE — independent re-review PASS.
 
-- Starting point: `planning/m0.6-persistence` at `98c5b9f793de8bb4ac08dde673b4750d25c4b2af`, descended from M0.5 merge `0be1bc51293311d14300ea6787e3fdcb1f952d7c`; clean working tree before implementation. Local upstream and read-only remote branch check both matched starting HEAD.
-- Changed: root `package.json`, `package-lock.json`, `apps/companion/package.json`, `apps/companion/src/index.ts`, `apps/companion/test/process.test.ts`; added `apps/companion/src/{paths,ownership,migrations,storage}.ts` and `apps/companion/test/storage.test.ts`; this Completion Evidence section only.
-- Paths: Windows `%LOCALAPPDATA%/Far Away`, macOS `~/Library/Application Support/Far Away`, Linux/other Unix `$XDG_DATA_HOME/far-away` or `~/.local/share/far-away`; canonical `companion.sqlite` and disk-backed `companion.owner` ownership artifact inside the root. Tests use explicit absolute temporary roots. Unix directory creation requests mode `0700`; errors fail startup with the path identified.
-- Ownership: the separate `companion.owner` SQLite artifact stores PID and UUID token. A short atomic write transaction checks the existing PID and publishes a new claim only when it is demonstrably dead; a second process-held write transaction locks the claim until token-checked release. SQLite releases that lock on crash. A crash before claim commit rolls back; a crash after commit leaves a dead PID that the next start can reclaim. Live or ambiguous PID status fails closed, and the 1000 ms lock wait is never treated as proof of death. Unit tests cover dead/live/ambiguous claims, interruption before commit, one winner among contenders, and wrong-token release. Spawned tests cover killed-process restart and two competing dead-claim reclaimers with exactly one READY process.
-- SQLite: the single Companion-owned `node:sqlite` connection opens only after ownership. Bootstrap sets a 5000 ms busy timeout, requests and verifies WAL, and enables and verifies foreign keys. The test migration observed `foreign_keys=1` on the owned connection; a read-only inspection connection observed WAL.
-- Migrations: integer versions and unique names are validated in order; persisted history must match the exact version/name prefix of definitions before any new migration runs. Valid prefix continuation runs only unapplied migrations. Retroactive insertion before applied version 2, renamed/reordered history, and unknown applied versions all fail before new work. Each new migration and `user_version` update is transactional; a thrown migration rolled back its table/history write and prevented READY. Production has only the migration-history table, no domain tables.
-- Lifecycle: path resolution/creation, owner acquisition, SQLite open/configuration, migrations, then READY. Startup failure unwinds database then ownership. Shutdown reports STOPPING, closes SQLite, releases the matching owner, reports STOPPED, then releases the executable lifetime hold; repeated runtime shutdown remains idempotent.
-- Focused tests: Companion 21 passed, 2 documented Windows signal skips. A spawned second executable sharing a live owner's temp root exited non-zero without READY; the first remained alive. A killed owner was replaced on restart, and two spawned reclaimers of a dead claim produced one READY process. Storage restart after graceful shutdown succeeded.
-- Regression: clean root `npm ci` passed; all six workspaces verified; Companion build/typecheck/tests, three M0.4 package typechecks, VS Code compile/lint and 92 tests on VS Code 1.138.0, Cloud typecheck and 73 tests across six files, aggregate `npm run validate`, and `git diff --check` all passed.
-- Diagram review: reviewed diagrams 02, 06, 10, and 11 before implementation and during final review. One Companion writer and local TB1 storage/ownership remain intact; no persisted source authority is loaded.
-- Negative-scope audit: no IPC, transport, VS Code client/activation change, adapter/discovery, canonical agent/session/outbox schema, relay, Telegram change, identity enrollment, routing/policy, or mobile work was introduced. `ARCHITECTURE.md`, canonical diagrams, and existing VS Code/Cloud/M0.4/M0.5 assertions were not changed.
-- Constraints/GAP: root, Companion, and both package-lock engine entries now require Node `>=22.17.0`, matching the tested `node:sqlite` baseline on Node 22.17.1. Windows child-process signals retain the documented two M0.5 skips. The previous persistent-recovery-claim GAP is eliminated for the corrected ownership protocol; no locked architecture CONFLICT was found. A pre-correction JSON `companion.owner` artifact is not automatically converted to the new SQLite artifact and fails closed; no migration of this unreleased M0.6 development format was attempted.
-
-Do not mark M0.6 complete in `WORKPLAN.md` until this evidence has been independently reviewed.
+- Starting checkout: `planning/m0.7-ipc` at `5b8ebe7a0587ba3cbc14a2fc31b1911b1e295d90`; the M0.6 merge `e29dd858b998fe2f5d319aadcb67b774a1c8e568` is an ancestor; the starting working tree was clean.
+- Changed files: Companion application, endpoint, framing, protocol, transport, storage ownership assertion, executable integration, and three focused test files under `apps/companion/`; explicit v1 DTOs in `packages/contracts/src/index.ts`; the narrow `packages/windows-ipc-security/` native package; root and Companion package manifests and root lockfile; this Completion Evidence section. No VS Code, Cloud, domain, adapter SDK, architecture, or diagram file changed.
+- Endpoint/transport: Windows uses a deterministic `\\.\pipe\far-away-<32 hex SHA-256 prefix>` locator from the normalized, lowercased selected data-root path. Unix uses `companion.sock` inside the selected data root. Neither is a credential. The server exposes no TCP, HTTP, WebSocket, or gRPC listener.
+- Windows OS boundary: the native Node-API addon obtains the current process token's user SID, converts `D:P(A;;GA;;;<current-user-SID>)` to a security descriptor, passes it explicitly to `CreateNamedPipeW`, requests `PIPE_REJECT_REMOTE_CLIENTS`, and refuses startup unless `GetSecurityInfo` confirms a protected DACL with exactly one current-user allow ACE. The Windows focused test observed `{ protectedDacl: true, currentUserOnly: true, aceCount: 1, rejectRemoteClients: true }`. The native code handles protected pipe creation/access control and the necessary raw pipe byte I/O; it has no Far Away protocol, domain, agent, cloud, or identity logic and uses no private Node/libuv handle API.
+- Unix OS boundary: code requires a real current-user data-root directory, restricts it to `0700`, binds a UDS, sets and verifies socket mode `0600`, and probes an existing socket before removing it only after the M0.6 ownership assertion. Two Unix real-transport tests cover mode and live/stale endpoint behavior but were skipped on this Windows host; Unix behavior was not executed here.
+- Framing: four-byte unsigned big-endian payload length, fatal UTF-8 JSON object decoding, and a 64 KiB byte maximum. Focused tests passed for UTF-8 byte counts, fragmented prefix/body, coalesced frames, and zero, oversized, truncated, invalid UTF-8/JSON, and non-object frames.
+- Protocol: only `hello`, `health.get`, and `companion.status` requests plus their explicit v1 responses and sanitized typed errors. `hello` negotiates v1 before read-only requests; incompatible ranges/versions, unknown messages, invalid sessions, and duplicate in-flight IDs fail closed. Request IDs are limited to 64 UTF-8 bytes and 32 simultaneous in-flight requests per connection.
+- Session: each OS-authorized connection gets a fresh 32-byte random challenge; successful `hello` binds it to v1 and a fresh UUID session ID. Reconnect changes both; stale challenge/session material is rejected and never stored in SQLite. Challenge echo and session ID provide protocol freshness and replay isolation, not standalone client authentication; the OS ACL/UDS permissions define the local principal boundary.
+- Read-only surfaces: `health.get` returns only `service: responsive` and bounded uptime seconds. `companion.status` returns only runtime state, transport kind, and v1 metadata. Focused tests compared exact response objects and checked canonical SQLite migration count/schema version before and after requests; handlers contain no storage dependency.
+- Lifecycle: startup is ownership → SQLite/WAL/migrations → IPC bind/security check → READY. Shutdown stops accepting and closes IPC clients before SQLite closes and ownership releases. A real occupied endpoint prevented READY and produced database-close then ownership-release events; repeated/concurrent stop remained idempotent. A newly injected `ipc-bound` hook failure produced IPC-close → database-close → ownership-release events, never reached READY, left the endpoint unavailable, and permitted a subsequent startup and client handshake.
+- Independent-review BLOCKER correction: Windows `disconnect()` now only marks/cancels the client; it never joins a reader from a data callback. Native data and control events wait at the bounded 256-event Node-API queue rather than dropping another client's data. A queued close event triggers client reclamation after it reaches JavaScript; server shutdown sets `closing` before joining readers. The Windows regression test blocked JavaScript while a child flooded the real Named Pipe, observed `queueFullCount > 0`, sent a malformed zero-length frame, and then confirmed a second real client received `health.get`, Companion remained READY, native clients were reclaimed, and shutdown completed.
+- Independent-review MAJOR correction: initialization failure after IPC bind now calls the IPC-first disposal path before closing SQLite and releasing ownership. The injected post-bind failure test verified ordering, no READY, no listening endpoint, and successful restart/bind.
+- Independent-review MINOR correction: the Windows close event now reaps its finished native client without awaiting a new connection. A dedicated clean-disconnect test verified native client count returned to zero while Companion remained READY; the pressure test also verified reclamation after malformed closure.
+- Focused/local result on Windows Node 22.17.1: Companion suite **37 passed, 0 failed, 4 skipped** (two Unix-only tests and the two existing Windows signal tests). The focused real transport file passed **8, skipped 2**; explicit DACL, saturated queue/malformed-client isolation, post-bind failure unwind, and clean-disconnect reclamation tests passed.
+- Full gate after correction: clean root `npm ci` passed; `npm ls --workspaces --depth=0` listed the original six plus the native workspace; native build passed with node-gyp/Visual Studio; Companion build/typecheck/tests and domain/contracts/adapter SDK typechecks passed; VS Code compile/lint and **92 tests on VS Code 1.138.0** passed; Cloud typecheck and **73 tests across 6 files** passed; aggregate `npm run validate` passed. `git diff --check` passed.
+- Read-only architecture/scope review: diagrams 02, 10, and 11 were reread. Companion remains the only local runtime/IPC owner; VS Code remains a future client; all IPC stays in TB1 over Named Pipe/UDS; no source, cloud, provider, or mobile authority enters the protocol. No M0.8 client, agent adapters, source resolution, relay, Telegram change, identity enrollment, D1–D5, iOS, generic command surface, or canonical diagram/architecture edit was introduced.
+- Platform limitation: real Unix UDS `0600` and stale-socket tests could not execute on this Windows host and are explicitly skipped as allowed by this slice. The three independent-review findings were independently re-reviewed and confirmed RESOLVED; no new finding, GAP, or CONFLICT remains. M0.7 is closed.
