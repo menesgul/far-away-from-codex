@@ -390,46 +390,44 @@ Stop and report instead of improvising if:
 
 ## Acceptance criteria
 
-- [ ] Baseline/branch/clean-tree preconditions recorded.
-- [ ] Diagrams 02, 10, and 11 reviewed.
-- [ ] Pure canonical locator logic is shared without moving authority out of Companion.
-- [ ] Companion M0.7 endpoint/path behavior remains unchanged.
-- [ ] VS Code has a bounded CompanionClient with no generic request escape hatch.
-- [ ] Real v1 hello/challenge/session handshake works.
-- [ ] `health.get` works through typed client API.
-- [ ] `companion.status` works through typed client API.
-- [ ] Missing Companion is typed and non-fatal.
-- [ ] Timeouts are finite and tested.
-- [ ] Disconnect invalidates session/pending state.
-- [ ] Stale/unknown/duplicate responses cannot cross-correlate.
-- [ ] Two independent clients can share one Companion without shared client authority/state.
-- [ ] No activation/M0.9 behavior changed.
-- [ ] Existing Telegram behavior remains green.
-- [ ] No local TCP/generic command/source-operation surface exists.
-- [ ] Full regression gate passes.
-- [ ] Negative-scope audit passes.
-- [ ] Independent review passes before M0.8 is checked in `WORKPLAN.md`.
+- [x] Baseline/branch/clean-tree preconditions recorded.
+- [x] Diagrams 02, 10, and 11 reviewed.
+- [x] Pure canonical locator logic is shared without moving authority out of Companion.
+- [x] Companion M0.7 endpoint/path behavior remains unchanged.
+- [x] VS Code has a bounded CompanionClient with no generic request escape hatch.
+- [x] Real v1 hello/challenge/session handshake works.
+- [x] `health.get` works through typed client API.
+- [x] `companion.status` works through typed client API.
+- [x] Missing Companion is typed and non-fatal.
+- [x] Timeouts are finite and tested.
+- [x] Disconnect invalidates session/pending state.
+- [x] Stale/unknown/duplicate responses cannot cross-correlate.
+- [x] Two independent clients can share one Companion without shared client authority/state.
+- [x] No activation/M0.9 behavior changed.
+- [x] Existing Telegram behavior remains green.
+- [x] No local TCP/generic command/source-operation surface exists.
+- [x] Full regression gate passes.
+- [x] Negative-scope audit passes.
+- [x] Independent review passes before M0.8 is checked in `WORKPLAN.md`.
 
 ## Completion Evidence
 
-**Status:** NOT IMPLEMENTED.
+**Status:** CLOSED / PASS. Independent M0.8 re-review passed; acceptance boxes and `WORKPLAN.md` are checked.
 
-When execution finishes, update only this section with factual evidence:
-
-- verified starting branch/SHA and ancestry;
-- pre-change baseline results;
-- files changed;
-- shared locator extraction and proof of unchanged Companion endpoint semantics;
-- CompanionClient public API;
-- transport/handshake/session behavior;
-- correlation/timeout/disconnect behavior;
-- real local transport and two-client evidence;
-- focused test counts;
-- full regression counts;
-- activation/Telegram preservation evidence;
-- diagrams reviewed;
-- negative-scope audit;
-- platform skips/limitations;
-- GAP/CONFLICT status.
+- Start: clean `planning/m0.8-vscode-companion-client` at `1db5525e913e2efe4e157d8630e3bcf06edfcdc4`; only the M0.8 planning commit follows ancestor `328bbd8`.
+- Pre-change baseline: root `npm run validate` passed; contracts, domain, adapter SDK, Cloud and Companion typechecks, Companion build, VS Code compile/lint, and Windows native IPC build passed. Companion: 37 pass, 0 fail, 4 skip (41 total). VS Code 1.138.0: 92 pass, 0 fail, 0 skip. Cloud: 73 pass, 0 fail, 0 skip (6 files).
+- Changed implementation paths: `packages/contracts/src/index.ts`, new `packages/contracts/src/local-locator.ts`, `packages/contracts/package.json`, `apps/companion/src/paths.ts`, `apps/companion/src/ipc-endpoint.ts`, `apps/companion/package.json`, new `apps/vscode/src/companion/CompanionClient.ts` and `ipc-frame.ts`, `apps/vscode/package.json`, root `package.json`, and `package-lock.json`. New tests: `apps/vscode/src/test/companion/CompanionClient.test.ts`, `ipc-frame.test.ts`, and `real-transport.test.ts`.
+- Shared locator: contracts now owns only pure data-root selection and M0.7 Named Pipe/UDS derivation. Companion's existing path and endpoint imports delegate to it; SQLite and ownership paths, filesystem mutation, IPC ownership, and native security remain Companion-local. Golden Windows, macOS, Linux/XDG, and Unix endpoint tests pass; existing Companion locator/IPC tests pass unchanged.
+- Client API: `connect()`, typed `healthGet()`, typed `companionStatus()`, `disconnect()`, and `dispose()`. It selects the shared canonical endpoint and uses Node local sockets only. It validates `hello.challenge`, sends exact v1 `hello`, accepts only matching `hello.ack`, then binds the returned session to that connection.
+- Correlation/lifecycle: generated unique IDs remain at most 64 UTF-8 bytes; at most 32 requests are pending. Finite connect/handshake and request timers, exact response shape/session/ID checks, sanitized typed errors, terminal fail-closed behavior, pending rejection/cleanup, and generation invalidation are tested. Missing/closed endpoint returns typed `unavailable`; no startup, UI, Telegram mutation, or network fallback occurs.
+- Real transport: on Windows, a test Companion process served two independent CompanionClient instances through the actual Named Pipe. A completed hello, health and status reads; B completed hello/read, then stayed responsive after A disconnected. Both clients and the test Companion stopped cleanly.
+- Focused tests: 17 pass, 0 fail, 0 skip. Final clean root `npm ci` installed 404 packages; `npm ls --workspaces --depth=0` passed. Contracts typecheck/build passed; no contracts test suite was added. Companion build/typecheck/tests: 37 pass, 0 fail, 4 skip (41 total). VS Code compile/lint/complete VS Code 1.138.0 suite: 109 pass, 0 fail, 0 skip (92 existing plus 17 new). Cloud typecheck/complete suite: 73 pass, 0 fail, 0 skip (6 files). Domain and adapter SDK typechecks, native Windows IPC build, root `npm run validate`, and `git diff --check` passed.
+- Independent review correction: both P1 findings were reproduced. With ignored contracts `dist` temporarily absent, direct Node resolution failed with `MODULE_NOT_FOUND` and independent `npm run companion:test` failed because its build had not produced contracts runtime JS. The Companion manifest and lockfile lacked its runtime `@far-away/contracts` dependency. The correction adds that dependency to both and uses Companion `prebuild` to build contracts; VS Code `precompile` builds contracts and `preextension:test` compiles before its independent test command. No locator or IPC wire logic changed.
+- Cold lifecycle proof: after explicitly removing `packages/contracts/dist`, clean root `npm ci` succeeded (404 packages) and left that directory absent. Without manual contracts build or root validate, independent `npm run companion:test` invoked contracts build through `prebuild` and passed 37/0/4 (41 total). Contracts `dist` was removed again; independent `npm run extension:test` invoked `preextension:test` → `compile` → `precompile` → contracts build and passed 109/0/0 on VS Code 1.138.0. A separate focused M0.8 run passed 17/0/0.
+- Dependency closure: `apps/companion/package.json` and `package-lock.json` both declare `@far-away/contracts: 0.0.1`; `npm ls --workspace=@far-away/companion --omit=dev --depth=0` lists contracts and Windows IPC as Companion production dependencies. Node resolution from the Companion package resolves the built contracts `dist/index.js` and its locator. The current M0 packaging is private npm workspaces; isolated publication outside that workspace is unsupported and was not claimed. Final `npm ls --workspaces --depth=0`, contracts/Companion/Cloud/domain/adapter SDK typechecks, contracts/Companion/native Windows builds, VS Code compile/lint, complete Companion 37/0/4, VS Code 109/0/0, Cloud 73/0/0 (6 files), and root `npm run validate` passed.
+- Preservation: `apps/vscode/src/extension.ts`, activation events, Telegram code, Cloud, domain, adapter SDK, Windows native security code, architecture and diagrams have no diff. Existing 92 VS Code tests remain green.
+- Reviewed diagrams: `02-local-component.mmd`, `10-deployment-topology.mmd`, and `11-trust-boundaries.mmd`. Read-only negative-scope audit found no Companion implementation import in VS Code, duplicated locator formula, public generic request/send API, TCP/HTTP/WebSocket fallback, automatic reconnect, SQLite/ownership access from VS Code, Windows security-package import in VS Code, M0.9+ change, or challenge/session-as-authentication claim.
+- Platform limits: Windows Named Pipe transport was executed. Unix-only Companion tests (2) and executable signal-handler tests (2) are skipped on Windows; Unix locator semantics were tested statically. Isolated package publication outside the root npm workspace was not tested. No architecture GAP/CONFLICT was found within M0.8.
+- Independent re-review: both corrected P1 findings are CLOSED; the review found 0 BLOCKER, 0 MAJOR, 0 MINOR, 0 GAP, and 0 CONFLICT findings and returned PASS for M0.8 closure.
 
 Do not mark M0.8 complete in `WORKPLAN.md` until this evidence has passed independent review.

@@ -90,3 +90,6 @@ export interface IpcProtocolError {
 export type IpcRequest = IpcHelloRequest | IpcHealthGetRequest | IpcCompanionStatusRequest;
 export type IpcResponse = IpcHelloChallenge | IpcHelloAck | IpcHealthGetResult |
   IpcCompanionStatusResult | IpcProtocolError;
+
+export { localDataRoot, localEndpoint } from './local-locator.js';
+export type { LocalPathEnvironment, LocalEndpoint } from './local-locator.js';
