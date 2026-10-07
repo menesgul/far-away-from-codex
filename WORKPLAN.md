@@ -162,7 +162,7 @@ Only one step is expanded in `WORKPLAN_TODO.md` at a time.
 - [x] **M0.4 — Introduce Domain / Contracts / Adapter SDK Boundaries**
 - [x] **M0.5 — Create Standalone Companion Runtime**
 - [x] **M0.6 — Add Companion Paths, SQLite Bootstrap & Single-Instance Ownership**
-- [ ] **M0.7 — Implement Minimal Local IPC Protocol**
+- [x] **M0.7 — Implement Minimal Local IPC Protocol**
 - [ ] **M0.8 — Add VS Code CompanionClient**
 - [ ] **M0.9 — Make VS Code Activation Lightweight and Companion-Aware**
 - [ ] **M0.10 — Add Multi-Client, Restart & Architecture-Boundary Tests**

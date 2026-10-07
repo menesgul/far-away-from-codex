@@ -1,0 +1,14 @@
+{
+  "name": "@far-away/windows-ipc-security",
+  "version": "0.0.1",
+  "private": true,
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "scripts": {
+    "install": "node build.mjs",
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "node-gyp": "^11.4.2"
+  }
+}

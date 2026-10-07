@@ -1,24 +1,18 @@
 import { MessageChannel } from 'node:worker_threads';
-import { CompanionRuntime } from './runtime.js';
-import { CompanionStorage } from './storage.js';
+import { CompanionApplication } from './application.js';
 
 let shuttingDown = false;
-// No M0.5 service owns an event-loop handle yet. This in-process hold keeps the
-// standalone executable alive without polling or opening a transport.
+// The lifetime hold also keeps the process alive during an IPC startup failure
+// until all acquired resources have been unwound.
 const lifetime = new MessageChannel();
 lifetime.port1.ref();
 let lifetimeReleased = false;
-let storage: CompanionStorage | undefined;
-const runtime = new CompanionRuntime({
-  initialize: async () => {
-    storage = await CompanionStorage.start({
-      paths: process.env.FAR_AWAY_COMPANION_TEST_DATA_ROOT
-        ? { testDataRoot: process.env.FAR_AWAY_COMPANION_TEST_DATA_ROOT }
-        : undefined,
-    });
-  },
-  dispose: async () => { await storage?.stop(); },
+const runtime = new CompanionApplication({
+  paths: process.env.FAR_AWAY_COMPANION_TEST_DATA_ROOT
+    ? { testDataRoot: process.env.FAR_AWAY_COMPANION_TEST_DATA_ROOT }
+    : undefined,
   onStateChange: (state) => console.log(`Companion ${state.toUpperCase()}`),
+  onFatalIpc: () => { void shutdown(); },
 });
 
 function releaseLifetime(): void {

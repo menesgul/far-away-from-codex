@@ -275,9 +275,9 @@ Do **not** implement:
 
 Before implementation and again during final self-review:
 
-- [ ] `docs/diagrams/02-local-component.mmd`
-- [ ] `docs/diagrams/10-deployment-topology.mmd`
-- [ ] `docs/diagrams/11-trust-boundaries.mmd`
+- [x] `docs/diagrams/02-local-component.mmd`
+- [x] `docs/diagrams/10-deployment-topology.mmd`
+- [x] `docs/diagrams/11-trust-boundaries.mmd`
 
 Review questions:
 
@@ -299,24 +299,24 @@ Any NO/unclear answer is a review finding.
 
 M0.7 is complete only when:
 
-- [ ] Windows endpoint policy is Named Pipe and Unix endpoint policy is UDS;
-- [ ] no local TCP/HTTP/WebSocket listener exists;
-- [ ] Windows Named Pipe creation uses an explicit protected DACL for the intended current user/logon principal rather than the default descriptor, and Unix UDS access is restricted to mode `0600` where supported;
-- [ ] framing is 4-byte big-endian length-prefixed UTF-8 JSON with a 64 KiB maximum;
-- [ ] fragmented/coalesced frames parse correctly and malformed frames fail closed per client;
-- [ ] concrete protocol-v1 contracts contain only `hello`, `health.get`, `companion.status`, and bounded responses/errors;
-- [ ] `hello` is mandatory and incompatible protocol versions fail closed;
-- [ ] fresh per-connection protocol challenge/session material exists, reconnect invalidates old connection material, and this mechanism is not claimed as standalone client authentication;
-- [ ] no shared secret, InstallationIdentity, relay credential, or source authority is invented for IPC;
-- [ ] `health.get` and `companion.status` are read-only and bounded;
-- [ ] multiple local transport clients can coexist without becoming authorities;
-- [ ] one malformed/disconnected client does not terminate Companion or another client;
-- [ ] IPC binds only after M0.6 storage bootstrap and closes before SQLite/ownership;
-- [ ] IPC startup failure prevents READY and unwinds acquired resources;
-- [ ] M0.5/M0.6 lifecycle and persistence semantics remain intact;
-- [ ] clean install and full regression gates pass;
-- [ ] implementation conforms to diagrams 02, 10, and 11;
-- [ ] no M0.8 VS Code client or later feature work has begun.
+- [x] Windows endpoint policy is Named Pipe and Unix endpoint policy is UDS;
+- [x] no local TCP/HTTP/WebSocket listener exists;
+- [x] Windows Named Pipe creation uses an explicit protected DACL for the intended current user/logon principal rather than the default descriptor, and Unix UDS access is restricted to mode `0600` where supported;
+- [x] framing is 4-byte big-endian length-prefixed UTF-8 JSON with a 64 KiB maximum;
+- [x] fragmented/coalesced frames parse correctly and malformed frames fail closed per client;
+- [x] concrete protocol-v1 contracts contain only `hello`, `health.get`, `companion.status`, and bounded responses/errors;
+- [x] `hello` is mandatory and incompatible protocol versions fail closed;
+- [x] fresh per-connection protocol challenge/session material exists, reconnect invalidates old connection material, and this mechanism is not claimed as standalone client authentication;
+- [x] no shared secret, InstallationIdentity, relay credential, or source authority is invented for IPC;
+- [x] `health.get` and `companion.status` are read-only and bounded;
+- [x] multiple local transport clients can coexist without becoming authorities;
+- [x] one malformed/disconnected client does not terminate Companion or another client;
+- [x] IPC binds only after M0.6 storage bootstrap and closes before SQLite/ownership;
+- [x] IPC startup failure prevents READY and unwinds acquired resources;
+- [x] M0.5/M0.6 lifecycle and persistence semantics remain intact;
+- [x] clean install and full regression gates pass;
+- [x] implementation conforms to diagrams 02, 10, and 11;
+- [x] no M0.8 VS Code client or later feature work has begun.
 
 ## Expected change shape
 
@@ -352,23 +352,22 @@ Stop and report instead of improvising if:
 
 ## Completion Evidence
 
-**Status:** NOT IMPLEMENTED.
+**Status:** COMPLETE — independent re-review PASS.
 
-When execution finishes, update only this section with factual evidence:
-
-- verified starting branch/SHA and clean working tree;
-- files changed;
-- endpoint/transport behavior;
-- OS-user access-control behavior, including Windows DACL/Unix UDS permission evidence, and any platform limitation;
-- framing behavior and limits;
-- protocol negotiation/error behavior;
-- challenge/session behavior;
-- health/status response surface;
-- startup/shutdown ordering;
-- focused test results, including real multi-client transport coverage;
-- full regression results;
-- diagram conformance;
-- negative-scope audit;
-- platform/environment constraints or deviations.
-
-Do not mark M0.7 complete in `WORKPLAN.md` until this evidence has been independently reviewed.
+- Starting checkout: `planning/m0.7-ipc` at `5b8ebe7a0587ba3cbc14a2fc31b1911b1e295d90`; the M0.6 merge `e29dd858b998fe2f5d319aadcb67b774a1c8e568` is an ancestor; the starting working tree was clean.
+- Changed files: Companion application, endpoint, framing, protocol, transport, storage ownership assertion, executable integration, and three focused test files under `apps/companion/`; explicit v1 DTOs in `packages/contracts/src/index.ts`; the narrow `packages/windows-ipc-security/` native package; root and Companion package manifests and root lockfile; this Completion Evidence section. No VS Code, Cloud, domain, adapter SDK, architecture, or diagram file changed.
+- Endpoint/transport: Windows uses a deterministic `\\.\pipe\far-away-<32 hex SHA-256 prefix>` locator from the normalized, lowercased selected data-root path. Unix uses `companion.sock` inside the selected data root. Neither is a credential. The server exposes no TCP, HTTP, WebSocket, or gRPC listener.
+- Windows OS boundary: the native Node-API addon obtains the current process token's user SID, converts `D:P(A;;GA;;;<current-user-SID>)` to a security descriptor, passes it explicitly to `CreateNamedPipeW`, requests `PIPE_REJECT_REMOTE_CLIENTS`, and refuses startup unless `GetSecurityInfo` confirms a protected DACL with exactly one current-user allow ACE. The Windows focused test observed `{ protectedDacl: true, currentUserOnly: true, aceCount: 1, rejectRemoteClients: true }`. The native code handles protected pipe creation/access control and the necessary raw pipe byte I/O; it has no Far Away protocol, domain, agent, cloud, or identity logic and uses no private Node/libuv handle API.
+- Unix OS boundary: code requires a real current-user data-root directory, restricts it to `0700`, binds a UDS, sets and verifies socket mode `0600`, and probes an existing socket before removing it only after the M0.6 ownership assertion. Two Unix real-transport tests cover mode and live/stale endpoint behavior but were skipped on this Windows host; Unix behavior was not executed here.
+- Framing: four-byte unsigned big-endian payload length, fatal UTF-8 JSON object decoding, and a 64 KiB byte maximum. Focused tests passed for UTF-8 byte counts, fragmented prefix/body, coalesced frames, and zero, oversized, truncated, invalid UTF-8/JSON, and non-object frames.
+- Protocol: only `hello`, `health.get`, and `companion.status` requests plus their explicit v1 responses and sanitized typed errors. `hello` negotiates v1 before read-only requests; incompatible ranges/versions, unknown messages, invalid sessions, and duplicate in-flight IDs fail closed. Request IDs are limited to 64 UTF-8 bytes and 32 simultaneous in-flight requests per connection.
+- Session: each OS-authorized connection gets a fresh 32-byte random challenge; successful `hello` binds it to v1 and a fresh UUID session ID. Reconnect changes both; stale challenge/session material is rejected and never stored in SQLite. Challenge echo and session ID provide protocol freshness and replay isolation, not standalone client authentication; the OS ACL/UDS permissions define the local principal boundary.
+- Read-only surfaces: `health.get` returns only `service: responsive` and bounded uptime seconds. `companion.status` returns only runtime state, transport kind, and v1 metadata. Focused tests compared exact response objects and checked canonical SQLite migration count/schema version before and after requests; handlers contain no storage dependency.
+- Lifecycle: startup is ownership → SQLite/WAL/migrations → IPC bind/security check → READY. Shutdown stops accepting and closes IPC clients before SQLite closes and ownership releases. A real occupied endpoint prevented READY and produced database-close then ownership-release events; repeated/concurrent stop remained idempotent. A newly injected `ipc-bound` hook failure produced IPC-close → database-close → ownership-release events, never reached READY, left the endpoint unavailable, and permitted a subsequent startup and client handshake.
+- Independent-review BLOCKER correction: Windows `disconnect()` now only marks/cancels the client; it never joins a reader from a data callback. Native data and control events wait at the bounded 256-event Node-API queue rather than dropping another client's data. A queued close event triggers client reclamation after it reaches JavaScript; server shutdown sets `closing` before joining readers. The Windows regression test blocked JavaScript while a child flooded the real Named Pipe, observed `queueFullCount > 0`, sent a malformed zero-length frame, and then confirmed a second real client received `health.get`, Companion remained READY, native clients were reclaimed, and shutdown completed.
+- Independent-review MAJOR correction: initialization failure after IPC bind now calls the IPC-first disposal path before closing SQLite and releasing ownership. The injected post-bind failure test verified ordering, no READY, no listening endpoint, and successful restart/bind.
+- Independent-review MINOR correction: the Windows close event now reaps its finished native client without awaiting a new connection. A dedicated clean-disconnect test verified native client count returned to zero while Companion remained READY; the pressure test also verified reclamation after malformed closure.
+- Focused/local result on Windows Node 22.17.1: Companion suite **37 passed, 0 failed, 4 skipped** (two Unix-only tests and the two existing Windows signal tests). The focused real transport file passed **8, skipped 2**; explicit DACL, saturated queue/malformed-client isolation, post-bind failure unwind, and clean-disconnect reclamation tests passed.
+- Full gate after correction: clean root `npm ci` passed; `npm ls --workspaces --depth=0` listed the original six plus the native workspace; native build passed with node-gyp/Visual Studio; Companion build/typecheck/tests and domain/contracts/adapter SDK typechecks passed; VS Code compile/lint and **92 tests on VS Code 1.138.0** passed; Cloud typecheck and **73 tests across 6 files** passed; aggregate `npm run validate` passed. `git diff --check` passed.
+- Read-only architecture/scope review: diagrams 02, 10, and 11 were reread. Companion remains the only local runtime/IPC owner; VS Code remains a future client; all IPC stays in TB1 over Named Pipe/UDS; no source, cloud, provider, or mobile authority enters the protocol. No M0.8 client, agent adapters, source resolution, relay, Telegram change, identity enrollment, D1–D5, iOS, generic command surface, or canonical diagram/architecture edit was introduced.
+- Platform limitation: real Unix UDS `0600` and stale-socket tests could not execute on this Windows host and are explicitly skipped as allowed by this slice. The three independent-review findings were independently re-reviewed and confirmed RESOLVED; no new finding, GAP, or CONFLICT remains. M0.7 is closed.
