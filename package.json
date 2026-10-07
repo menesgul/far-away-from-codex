@@ -22,6 +22,7 @@
     "cloud:test": "npm run test --workspace=far-away-from-codex-worker",
     "domain:typecheck": "npm run typecheck --workspace=@far-away/domain",
     "contracts:typecheck": "npm run typecheck --workspace=@far-away/contracts",
+    "contracts:build": "npm run build --workspace=@far-away/contracts",
     "adapter-sdk:typecheck": "npm run typecheck --workspace=@far-away/agent-adapter-sdk",
     "companion:build": "npm run build --workspace=@far-away/companion",
     "windows-ipc-security:build": "npm run build --workspace=@far-away/windows-ipc-security",
@@ -29,7 +30,7 @@
     "companion:test": "npm run test --workspace=@far-away/companion",
     "worker:typecheck": "npm run cloud:typecheck",
     "worker:test": "npm run cloud:test",
-    "validate": "npm run domain:typecheck && npm run contracts:typecheck && npm run adapter-sdk:typecheck && npm run windows-ipc-security:build && npm run companion:build && npm run companion:typecheck && npm run companion:test && npm run extension:compile && npm run extension:lint && npm run extension:test && npm run cloud:typecheck && npm run cloud:test"
+    "validate": "npm run domain:typecheck && npm run contracts:typecheck && npm run contracts:build && npm run adapter-sdk:typecheck && npm run windows-ipc-security:build && npm run companion:build && npm run companion:typecheck && npm run companion:test && npm run extension:compile && npm run extension:lint && npm run extension:test && npm run cloud:typecheck && npm run cloud:test"
   },
   "overrides": {
     "diff": "^8.0.4",

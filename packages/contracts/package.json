@@ -5,10 +5,12 @@
   "types": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts"
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
     }
   },
   "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit false --rootDir src --outDir dist --declaration",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   }
 }

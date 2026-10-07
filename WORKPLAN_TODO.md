@@ -1,373 +1,433 @@
-# WORKPLAN_TODO.md — Active Implementation Slice
+# WORKPLAN_TODO.md — Current Executable Slice
 
-> **Current milestone:** M0 — Repository & Runtime Foundation
->
-> **Current step:** M0.7 — Implement Minimal Local IPC Protocol
->
-> Implement **only this step**. Do not begin M0.8 or any later work.
+> Only the slice below is executable. Do not begin M0.9 or later work.
 
-## Why this step exists
+# M0.8 — Add VS Code CompanionClient
 
-M0.5 established the standalone Companion process and M0.6 established deterministic local paths, single-instance ownership, and the canonical SQLite lifecycle. M0.7 adds the first supported local client boundary around that Companion:
+## Status
 
-- a per-user local IPC server owned by Companion;
-- Windows Named Pipe / Unix Domain Socket transport, never TCP;
-- versioned length-delimited JSON framing;
-- minimal protocol-v1 negotiation and read-only health/status requests;
-- multiple transport clients may connect without becoming Companion authority.
+**PLANNED — NOT IMPLEMENTED.**
 
-This slice proves the Companion can expose a narrow local control/diagnostic boundary. It does **not** yet add the VS Code CompanionClient, extension activation/bootstrap, agent operations, or remote/cloud actions.
+M0.1–M0.7 are complete. Canonical baseline for this slice is merged `main` commit:
 
-## Verified starting state
+`328bbd859a834cb14cc2a391e6dbd04352d9cc9e`
 
-Authoritative merged checkpoint on `main`:
+M0.8 remains unchecked in `WORKPLAN.md` until implementation, regression gates, and independent review pass.
 
-`e29dd858b998fe2f5d319aadcb67b774a1c8e568`
+## Objective
 
-Merge message:
+Add a VS Code-side `CompanionClient` that consumes the already-locked M0.7 local IPC protocol and can connect to an **already-running** Companion, complete the v1 hello/challenge handshake, issue the two existing read-only requests, and disconnect cleanly.
 
-`Merge pull request #4 from menesgul/planning/m0.6-persistence`
+This slice establishes the client boundary only. It does **not** make extension activation Companion-aware, start/install/update Companion, migrate Telegram ownership, or begin M0.9+.
 
-At this checkpoint:
+## Baseline facts from the merged repository
 
-- M0.1–M0.6 are marked complete in `WORKPLAN.md`;
-- the repository has six workspaces and one canonical root lockfile;
-- `apps/companion` is a standalone Node >=22.17 TypeScript process;
-- Companion acquires one local ownership claim before opening its canonical SQLite database;
-- SQLite WAL/migrations and restart-safe cleanup are green;
-- Companion reaches READY independently of VS Code;
-- `packages/contracts` currently contains only `ProtocolVersion` and JSON wire vocabulary; concrete IPC messages do not yet exist;
-- no Named Pipe/UDS server, local TCP server, IPC framing, negotiation, challenge/session authentication, or VS Code CompanionClient exists;
-- reviewed M0.6 regression evidence is Companion 21 passing / 2 documented Windows signal skips, VS Code 92 passing on 1.138.0, Cloud 73 passing across 6 files, and aggregate validation green.
+- Companion is the single local runtime authority and owns the IPC server.
+- M0.7 exposes only `hello`, `health.get`, and `companion.status`.
+- Windows transport is a protected current-user Named Pipe; Unix transport is an owner-only UDS; there is no local TCP.
+- Framing is 4-byte unsigned big-endian length + UTF-8 JSON object, maximum 64 KiB.
+- `packages/contracts` already owns the v1 wire DTOs.
+- Endpoint derivation currently lives in `apps/companion/src/ipc-endpoint.ts`.
+- Companion data-root derivation currently lives in `apps/companion/src/paths.ts`.
+- The VS Code extension still activates on `onStartupFinished` and directly constructs legacy `BackendClient`, `SecretStore`, Telegram state/onboarding/commands, and the status bar.
+- Existing extension regression baseline is 92 tests on VS Code 1.138.0.
+- The extension currently has no dependency on `@far-away/contracts` and no Companion IPC client.
 
-Planning branch:
+## Required architecture — MUST PRESERVE
 
-`planning/m0.7-ipc`
-
-Before implementation, verify the local checkout is based on this branch/checkpoint, is up to date, and has no unrelated working-tree changes. Otherwise stop and report.
-
-## Architecture source — MUST REVIEW
-
-Read `ARCHITECTURE.md`, `WORKPLAN.md`, and this file before editing.
-
-M0.7 is derived primarily from locked **B3/B4/B5 local-boundary decisions** plus the Phase A product boundary. Later C/D/E decisions remain constraints only: local IPC must not become a generic agent controller, cloud relay, policy/action path, or remote source-resolution surface.
-
-The relevant canonical diagrams are **exactly these three**:
-
-1. `docs/diagrams/02-local-component.mmd` — Companion owns the Local IPC Server; VS Code is only a local client and does not become runtime authority.
-2. `docs/diagrams/10-deployment-topology.mmd` — VS Code ↔ Companion uses Named Pipe / UDS inside the desktop OS account boundary; no local TCP.
-3. `docs/diagrams/11-trust-boundaries.mmd` — local IPC remains inside TB1; it must not cross into cloud/provider/source authority.
-
-Do **not** require diagrams 01, 03–09 for this slice. M0.7 implements no agent integration, source permission round-trip, offline source revalidation, multi-device behavior, Telegram, cloud relay, or iOS.
-
-Diagrams clarify boundaries; explicit locked architecture text wins on conflict.
-
-## Locked architecture constraints
-
-Preserve all of the following:
-
-- Companion remains the standalone per-user **single local Far Away authority**.
-- Local IPC is owned by Companion, not VS Code.
-- Windows transport is a Named Pipe; Unix-like transport is a Unix Domain Socket.
-- no local TCP/HTTP/WebSocket listener exists.
-- the protocol is versioned, length-delimited JSON.
-- protocol incompatibility fails closed.
-- OS-user access control is part of the local IPC boundary and is the authentication boundary for which local OS principals may connect.
-- M0.7 uses **OS-authenticated transport + protocol session establishment**. The protocol challenge/nonce and session identifier provide freshness, negotiation/session binding, and replay isolation; they are not standalone client authentication and must never be described as such.
-- M0.7 must not invent B5 InstallationIdentity, OAuth, relay credentials, P-256 enrollment, or a shared secret in the data directory.
-- multiple local transport clients may connect to the same Companion without becoming authorities.
-- VS Code remains UI/setup/bootstrap only; M0.7 does not implement `CompanionClient`.
-- no generic `sendPrompt`, `executeCommand`, arbitrary method, shell, agent command, or source-resolution endpoint may exist.
-- IPC status never implies coding-agent/source authority.
-- SQLite remains the single canonical Companion database lifecycle from M0.6; IPC must not introduce another canonical writer.
-
-## Exact scope
-
-### 1. Local endpoint policy and transport abstraction
-
-Add a small testable Companion-owned local IPC transport abstraction.
-
-Endpoint policy:
-
-- Windows: deterministic per-user Named Pipe name derived from the selected Companion data-root identity/path without embedding secrets;
-- macOS/Linux/other Unix: deterministic Unix Domain Socket path inside the selected Companion data root;
-- tests use explicit temporary roots/endpoints and never the real user Far Away directory.
-
-Required transport semantics:
-
-- bind/listen only after M0.6 ownership + SQLite bootstrap succeeds;
-- no TCP port and no HTTP/WebSocket server;
-- reject startup if the selected local endpoint cannot be bound safely;
-- Unix stale socket cleanup is allowed only after Companion ownership for that data root is held; never unlink an endpoint that may belong to another live authority;
-- Unix socket permissions must be restricted to the owning OS user where Node/platform support permits;
-- Windows Named Pipe must be created with an explicit protected Windows security descriptor/DACL that grants the intended current user/logon principal access and does not rely on the default Named Pipe security descriptor. The implementation may introduce the smallest narrowly scoped native Windows security boundary required to call documented Windows Named Pipe/security APIs. That native boundary owns only secure pipe creation/access control; it must not own Far Away protocol, domain, Companion lifecycle, agent, cloud, or identity logic;
-- do not use Node/libuv private or undocumented internals as the security boundary;
-- Unix Domain Socket access must be restricted to the owning user with mode `0600` after bind (and the containing Far Away data root remains per-user);
-- closing the IPC server must stop accepting new clients and clean up the endpoint without releasing M0.6 process ownership prematurely.
-
-Do not use the IPC endpoint as the M0.6 single-instance primitive.
-
-### 2. Length-delimited JSON framing
-
-Implement a deterministic streaming frame codec for local IPC.
-
-Use a fixed **4-byte unsigned big-endian length prefix** followed by exactly that many UTF-8 bytes containing one JSON value.
-
-Requirements:
-
-- frame length counts UTF-8 bytes, not JavaScript characters;
-- parsing supports fragmented prefix/body reads and multiple frames in one read;
-- define a conservative maximum frame size of **64 KiB** for M0.7;
-- zero-length, oversized, truncated-at-EOF, invalid UTF-8, invalid JSON, and non-object top-level frames fail closed;
-- malformed input closes/rejects only that client connection and must not terminate Companion or other clients;
-- no newline-delimited or delimiter-scanning fallback;
-- outbound messages use the same codec.
-
-### 3. Protocol v1 contracts and envelope
-
-Extend `packages/contracts` with only the concrete local IPC v1 wire DTOs required by M0.7.
-
-Every message must carry a protocol version and explicit message type. Keep DTOs JSON-only and separate from canonical domain types.
-
-Protocol v1 request surface is exactly:
-
-- `hello`
-- `health.get`
-- `companion.status`
-
-And corresponding bounded responses/errors.
-
-Required semantics:
-
-- `hello` is mandatory before any other request;
-- client proposes its supported protocol range/version;
-- Companion selects a compatible v1 version or returns a protocol error and closes;
-- major-version incompatibility fails closed;
-- unknown message types fail closed for that request/connection and never dispatch arbitrary methods;
-- request IDs are opaque correlation values with a documented bounded string size; they are not authority tokens;
-- duplicate in-flight request IDs on one connection are rejected;
-- wire errors are typed and sanitized; no stack traces, filesystem secrets, database handles, source/vendor payloads, or raw exception objects cross IPC.
-
-Do not add generic RPC method names or a generic command envelope that future code could use to bypass the explicit allowlist.
-
-### 4. OS-authenticated transport + protocol session establishment
-
-After transport connection, establish a connection-local challenge as part of `hello`.
-
-M0.7 separates two responsibilities: the OS transport boundary determines which local principal may connect; the protocol handshake establishes a fresh negotiated Far Away session on an already OS-authorized connection. A challenge echo by itself is **not** authentication.
-
-Requirements:
-
-- Companion generates a fresh unpredictable challenge/nonce per OS-authorized connection;
-- the successful `hello` exchange must bind the negotiated protocol and a fresh connection/session identifier to that challenge;
-- no non-`hello` request is accepted before the connection reaches protocol-established state;
-- session/challenge values are connection-local, short-lived runtime material and are never InstallationIdentity, relay credentials, or source authority;
-- reconnect creates a new challenge/session; old connection material cannot be replayed as a current session;
-- do not persist session/challenge values in SQLite;
-- do not expose cloud/relay credentials to local clients.
-
-Windows must obtain the required access-control guarantee from documented Windows security primitives (explicit Named Pipe security descriptor/DACL), and Unix from UDS filesystem permissions. The challenge/session layer must not be presented as a substitute for that OS authentication boundary. Do not invent a shared secret in the data directory.
-
-### 5. Minimal read-only request behavior
-
-Implement only:
-
-`health.get`
-- proves the Companion IPC service is responsive;
-- returns bounded process/runtime health information only;
-- must not claim agent/source health or authority.
-
-`companion.status`
-- returns the Companion runtime state and minimal protocol/runtime metadata needed by future local clients;
-- must not expose canonical DB internals, source sessions, PendingInteraction data, relay credentials, filesystem secrets, or vendor payloads.
-
-Both requests are read-only. They must not mutate canonical state or SQLite.
-
-### 6. Runtime integration and ordering
-
-Extend the M0.6 executable lifecycle so startup is:
-
-`paths/ownership → SQLite/migrations → local IPC bind/listen → READY`
-
-Shutdown is:
-
-`STOPPING → stop accepting IPC → close active IPC connections → close SQLite → release ownership → STOPPED → release executable lifetime hold`
-
-Requirements:
-
-- if IPC bind/start fails, unwind IPC resources if any, then SQLite, then ownership; never reach READY;
-- IPC client disconnect must not stop Companion;
-- malformed/failed client must not affect other clients;
-- multiple simultaneous clients are allowed at the transport/protocol layer;
-- repeated/concurrent Companion shutdown remains idempotent.
-
-M0.8 will add the actual VS Code client. Do not modify VS Code application behavior in M0.7.
-
-## Tests required
-
-Add deterministic focused tests covering at least:
-
-- Windows endpoint policy produces a Named Pipe and never a TCP endpoint;
-- Windows secure pipe creation applies an explicit protected DACL for the intended current user/logon principal and does not fall back to the default Named Pipe security descriptor;
-- Unix real-transport coverage verifies the UDS is restricted to mode `0600` where supported;
-- Unix endpoint policy produces a UDS inside a temp data root;
-- Unix stale endpoint handling is safe and occurs only under Companion ownership;
-- frame encode/decode uses UTF-8 byte length;
-- fragmented prefix/body parsing;
-- multiple frames in one chunk;
-- zero/oversized/truncated/invalid-UTF8/invalid-JSON/non-object frames fail closed;
-- one malformed client does not terminate the IPC server or another healthy client;
-- `hello` is required before every non-hello request;
-- compatible v1 negotiation succeeds;
-- incompatible major version fails closed;
-- unknown message type is rejected without generic dispatch;
-- duplicate in-flight request ID rejection;
-- fresh protocol challenge/session material per OS-authorized connection and reconnect;
-- stale/replayed connection material is not accepted as a current session;
-- `health.get` returns only bounded local health;
-- `companion.status` returns only bounded Companion/runtime metadata;
-- neither read-only request writes to SQLite/canonical state;
-- server bind occurs only after M0.6 storage ownership/bootstrap;
-- IPC startup failure prevents READY and unwinds storage/ownership;
-- shutdown closes IPC before SQLite/ownership;
-- at least two real local transport clients can connect concurrently to one Companion and independently complete `hello` + read-only requests;
-- disconnecting one client leaves the other client and Companion alive.
-
-Where platform-specific transport tests cannot execute on the current OS, keep pure endpoint-policy tests cross-platform and explicitly document skipped real-transport coverage. Do not fake a TCP transport for portability.
-
-Preserve the two documented Windows signal-test skips from M0.5/M0.6; do not solve them in this slice unless required by IPC shutdown correctness.
-
-## Root/regression contract
-
-M0.7 should be dominated by `apps/companion/**` and `packages/contracts/**`. Root/lockfile edits are allowed only for a justified dependency or orchestration change.
-
-Run:
-
-1. clean root `npm ci`;
-2. verify all six workspaces;
-3. Companion build/typecheck/tests;
-4. domain/contracts/adapter-sdk typechecks;
-5. VS Code compile/lint/**92 tests on VS Code 1.138.0**;
-6. Cloud typecheck/**73 tests across 6 files**;
-7. aggregate root `npm run validate`;
-8. `git diff --check`.
-
-No existing VS Code/Cloud/package test may be deleted, skipped, or weakened to pass M0.7.
-
-## Explicitly forbidden in M0.7
-
-Do **not** implement:
-
-- VS Code `CompanionClient`, activation, bootstrap, status bar, view, walkthrough, or extension behavior changes;
-- local TCP, HTTP, WebSocket, gRPC, Electron IPC, or stdio as the production transport;
-- generic RPC/command/prompt/shell/agent-control endpoints;
-- agent manager, production/fake agent adapters, discovery/observation/resolution;
-- AgentSession/PendingInteraction/AttentionEvent/outbox production persistence;
-- source request resolution or permission round-trip;
-- Companion ↔ cloud relay;
-- Telegram behavior changes;
-- account/OAuth/InstallationIdentity/P-256/secure-store enrollment;
-- D1 routing, D2 escalation, D3 policy, D4 synthetic attention, D5 inbox;
-- iOS/APNs/Live Activity/Dynamic Island;
-- changes to canonical diagrams or `ARCHITECTURE.md`.
+- Coding-agent runtime owns source truth.
+- Companion remains the single local Far Away authority.
+- VS Code is an optional UI/setup/bootstrap client only.
+- VS Code must never read Companion SQLite or ownership files as state/authority.
+- VS Code must never instantiate a competing Companion.
+- Local IPC remains Named Pipe / UDS only; no TCP/HTTP/WebSocket fallback.
+- OS-user access control is the local-principal boundary.
+- Hello challenge/session establishes protocol negotiation, freshness, connection/session binding, and replay isolation; it is not standalone authentication.
+- Fail closed on incompatible/malformed protocol.
+- No generic command, prompt, shell, source-resolution, or agent-control API.
 
 ## Relevant diagrams — MUST REVIEW
 
-Before implementation and again during final self-review:
+Before implementation, reread:
 
-- [x] `docs/diagrams/02-local-component.mmd`
-- [x] `docs/diagrams/10-deployment-topology.mmd`
-- [x] `docs/diagrams/11-trust-boundaries.mmd`
+- [ ] `docs/diagrams/02-local-component.mmd`
+- [ ] `docs/diagrams/10-deployment-topology.mmd`
+- [ ] `docs/diagrams/11-trust-boundaries.mmd`
 
-Review questions:
+The diagrams clarify boundaries but do not override explicit locked architecture text. Stop on a conflict.
 
-- Is Companion still the sole owner of the IPC server and canonical local runtime?
-- Is VS Code still only a future client rather than runtime authority?
-- Is the transport exclusively Named Pipe / UDS with no local TCP?
-- Does Windows enforce the intended local principal boundary with an explicit protected Named Pipe DACL and Unix with UDS permissions before protocol session establishment?
-- Is the challenge/session mechanism correctly described as protocol freshness/session binding rather than standalone client authentication?
-- Can malformed/incompatible clients affect only themselves rather than Companion/other clients?
-- Does IPC expose only the explicit M0.7 read-only allowlist?
-- Can any IPC message be interpreted as a generic agent/source command?
-- Are challenge/session values clearly distinct from InstallationIdentity, relay credentials, and source authority?
-- Does shutdown close IPC before SQLite/ownership?
-- Did any M0.8+ responsibility get pulled forward?
+## Planning resolutions
 
-Any NO/unclear answer is a review finding.
+### A. CompanionClient responsibility in M0.8
 
-## Acceptance criteria
+`CompanionClient` owns only the VS Code-side mechanics of one local IPC connection:
 
-M0.7 is complete only when:
+1. derive/select the canonical local Companion endpoint through shared locator logic;
+2. connect through Node `net` to the Named Pipe/UDS;
+3. decode the server's `hello.challenge`;
+4. send exact v1 `hello` with a bounded request ID and the received challenge;
+5. validate `hello.ack` and establish the connection-scoped session;
+6. expose typed `health.get` and `companion.status` operations;
+7. correlate responses to pending requests;
+8. apply bounded timeouts and deterministic cleanup;
+9. invalidate all connection/session/request state on disconnect/protocol failure;
+10. support multiple independent `CompanionClient` instances without assuming one VS Code window.
 
-- [x] Windows endpoint policy is Named Pipe and Unix endpoint policy is UDS;
-- [x] no local TCP/HTTP/WebSocket listener exists;
-- [x] Windows Named Pipe creation uses an explicit protected DACL for the intended current user/logon principal rather than the default descriptor, and Unix UDS access is restricted to mode `0600` where supported;
-- [x] framing is 4-byte big-endian length-prefixed UTF-8 JSON with a 64 KiB maximum;
-- [x] fragmented/coalesced frames parse correctly and malformed frames fail closed per client;
-- [x] concrete protocol-v1 contracts contain only `hello`, `health.get`, `companion.status`, and bounded responses/errors;
-- [x] `hello` is mandatory and incompatible protocol versions fail closed;
-- [x] fresh per-connection protocol challenge/session material exists, reconnect invalidates old connection material, and this mechanism is not claimed as standalone client authentication;
-- [x] no shared secret, InstallationIdentity, relay credential, or source authority is invented for IPC;
-- [x] `health.get` and `companion.status` are read-only and bounded;
-- [x] multiple local transport clients can coexist without becoming authorities;
-- [x] one malformed/disconnected client does not terminate Companion or another client;
-- [x] IPC binds only after M0.6 storage bootstrap and closes before SQLite/ownership;
-- [x] IPC startup failure prevents READY and unwinds acquired resources;
-- [x] M0.5/M0.6 lifecycle and persistence semantics remain intact;
-- [x] clean install and full regression gates pass;
-- [x] implementation conforms to diagrams 02, 10, and 11;
-- [x] no M0.8 VS Code client or later feature work has begun.
+It is a transport/protocol client, not a local authority.
 
-## Expected change shape
+### B. Explicit non-responsibilities
 
-A conforming diff should be dominated by:
+M0.8 does not own Companion process lifecycle, installation/update, automatic startup, agent discovery, Telegram/cloud migration, canonical state, persistence, source resolution, policy/routing, or UI/status-bar redesign.
+
+### C. Activation boundary
+
+**Do not integrate CompanionClient into `activate()` in M0.8.**
+
+The current `activate()` performs legacy Telegram/backend initialization and onboarding under `onStartupFinished`. Replacing or restructuring that lifecycle is exactly the M0.9 boundary. M0.8 must deliver a tested client abstraction without changing activation behavior.
+
+### D. Canonical endpoint discovery
+
+Do not duplicate `resolveCompanionPaths()` / `localEndpoint()` formulas inside VS Code and do not import `apps/companion/src/**` from the extension.
+
+Move only the **pure locator vocabulary/derivation** needed by both processes into `packages/contracts` (or a narrowly scoped module inside that package), then have Companion and VS Code consume it.
+
+Allowed shared locator logic:
+- deterministic per-user data-root selection inputs/defaults;
+- deterministic Named Pipe / UDS endpoint derivation;
+- endpoint transport/path type.
+
+Not allowed in the shared package:
+- directory creation/chmod;
+- ownership acquisition/assertion;
+- SQLite paths/lifecycle;
+- server security implementation;
+- Companion runtime lifecycle.
+
+The endpoint name/path is a locator, never a credential.
+
+### E. Contract reuse
+
+Reuse the existing IPC DTOs from `@far-away/contracts`. Do not import Companion protocol/session/server classes into VS Code.
+
+The client may implement its own small frame codec in `apps/vscode` for this slice. Do not move server protocol state or Companion implementation into a shared package merely for code reuse. If implementation reveals that a pure framing helper genuinely must be shared, stop and report rather than broadening `packages/contracts` into generic runtime code without review.
+
+### F. Reconnect boundary
+
+M0.8 provides **no automatic reconnect loop**.
+
+After disconnect, timeout, malformed response, protocol error, or transport failure:
+- the current connection/session is terminal;
+- all pending requests reject exactly once;
+- session/challenge state is discarded;
+- a caller may explicitly call `connect()` again on a clean client instance/state.
+
+Automatic retry/backoff, Companion restart recovery, and restart/multi-window architecture expansion belong to M0.10 (with M0.9 owning activation/bootstrap integration).
+
+### G. Companion absent
+
+Missing endpoint / refused connection is a typed, non-fatal client outcome. It must not:
+- start Companion;
+- show UI by itself;
+- mutate Telegram state;
+- fall back to network transport.
+
+M0.9 decides how activation/bootstrap reacts to this state.
+
+### H. Disconnect invalidation
+
+Any terminal connection event invalidates:
+- challenge;
+- session ID;
+- decoder partial state;
+- pending request map;
+- connection generation.
+
+Late/stale responses from an old connection must never satisfy requests on a later connection.
+
+### I. Minimum proof
+
+M0.8 must prove the client boundary through focused tests:
+- fragmented/coalesced frame decoding and exact 64 KiB behavior on the client side;
+- successful real local transport handshake against Companion;
+- `health.get` and `companion.status` exact typed responses;
+- missing Companion endpoint/refused connection;
+- incompatible/malformed hello/response handling;
+- request timeout;
+- connection loss rejects all pending requests exactly once;
+- stale/unknown/duplicate response correlation cannot satisfy the wrong request;
+- explicit disconnect cleans state;
+- two independent client instances can connect to the same already-running Companion without shared mutable client state.
+
+The last item proves the client abstraction only; restart orchestration and broader M0.10 boundary testing remain out of scope.
+
+### J. GAP / CONFLICT
+
+No architecture conflict blocks M0.8.
+
+One implementation boundary must be handled deliberately: endpoint/data-root derivation is currently Companion-local, but VS Code must locate the same endpoint without importing Companion internals or duplicating canonical formulas. The approved M0.8 solution is to extract only this pure locator logic into `packages/contracts`; this does not move authority out of Companion.
+
+## In scope
+
+### 1. Shared pure local-IPC locator
+
+- Extract the minimum pure locator logic from Companion into `packages/contracts`.
+- Preserve existing Windows/macOS/Linux/XDG path semantics exactly.
+- Preserve M0.7 endpoint derivation exactly.
+- Update Companion to consume the shared locator without behavioral change.
+- Add focused contract tests/typechecks if required to prove identical derivation.
+
+### 2. VS Code CompanionClient
+
+Add a narrow client area, expected shape:
 
 ```text
-apps/companion/src/**
-apps/companion/test/**
-packages/contracts/src/**
-packages/contracts/test/**          # if contract-focused tests are justified
-packages/windows-ipc-security/**     # only if used for the narrow documented Windows DACL/native boundary
-package.json / package-lock.json    # only if genuinely required
-WORKPLAN_TODO.md                    # Completion Evidence only during execution
+apps/vscode/src/companion/
+  CompanionClient.ts
+  ipc-frame.ts
 ```
 
-Unexpected edits to `apps/vscode/**`, `apps/cloud/**`, `packages/domain/**`, `packages/agent-adapter-sdk/**`, diagrams, or `ARCHITECTURE.md` require explanation and normally indicate scope drift.
+Exact filenames may vary only if the existing repository conventions justify it.
+
+Client public surface must remain bounded to connection lifecycle plus:
+- `connect()`
+- `healthGet()`
+- `companionStatus()`
+- `disconnect()/dispose()`
+
+No generic `request(type, payload)` or public raw-send escape hatch.
+
+### 3. Client protocol state
+
+- v1 only;
+- hello-first;
+- exact challenge echo;
+- exact session binding;
+- bounded request IDs (1–64 UTF-8 bytes);
+- maximum 32 client-side pending requests;
+- finite per-connect/per-request timeout;
+- one response settles one matching request;
+- protocol errors are typed/sanitized;
+- malformed/incompatible/stale responses fail closed;
+- no persistence of challenge/session IDs.
+
+### 4. Transport
+
+- Node local socket client only via Named Pipe/UDS endpoint path.
+- No dependency on `@far-away/windows-ipc-security` in VS Code: Windows access control is enforced by the Companion-owned server object; the client uses the OS-authorized Named Pipe.
+- No TCP fallback.
+
+### 5. Tests
+
+Add focused VS Code tests under the existing `src/test/**` harness. Where real Companion transport is required, use the actual Companion server/test fixture or a narrowly scoped test helper without importing production Companion authority into extension production code.
+
+## Explicitly out of scope
+
+- modifying `activationEvents`;
+- constructing/connecting CompanionClient from `extension.ts`;
+- Companion autostart/install/update/bootstrap;
+- status-bar/UI changes for Companion;
+- deleting/replacing legacy BackendClient/SecretStore/Telegram flows;
+- Telegram/cloud schema or Worker changes;
+- production agent adapters/discovery/observation/resolution;
+- PendingInteraction implementation;
+- generic IPC RPC;
+- local TCP/HTTP/WebSocket;
+- B5 account/installation identity, OAuth, P-256;
+- D1–D5;
+- iOS/APNs/Live Activity/Dynamic Island;
+- automatic reconnect/backoff/restart orchestration;
+- M0.11 cleanup;
+- M0.12 audit.
+
+## Allowed implementation paths
+
+A conforming implementation should be limited to:
+
+```text
+apps/vscode/src/companion/**
+apps/vscode/src/test/companion/**
+apps/vscode/package.json
+apps/companion/src/paths.ts
+apps/companion/src/ipc-endpoint.ts
+apps/companion/**/tests only where required for locator-regression proof
+packages/contracts/src/**
+packages/contracts/test/**          # only if introduced for pure locator tests
+packages/contracts/package.json    # only if test/build surface requires it
+package.json                        # only for explicit gate/workspace script needs
+package-lock.json                   # only dependency/workspace metadata caused by the slice
+WORKPLAN_TODO.md                    # Completion Evidence only after execution
+```
+
+If implementation requires edits to `apps/vscode/src/extension.ts`, `apps/cloud/**`, `packages/domain/**`, `packages/agent-adapter-sdk/**`, `packages/windows-ipc-security/**`, `ARCHITECTURE.md`, or diagrams, stop and report before editing.
+
+## Implementation sequence
+
+1. Verify branch, baseline ancestry, and clean working tree.
+2. Reread architecture, this slice, and diagrams 02/10/11.
+3. Run/record pre-change regression baseline.
+4. Extract pure data-root/endpoint locator logic into contracts without changing M0.7 semantics.
+5. Repoint Companion path/endpoint use to the shared locator; run focused Companion locator/IPC tests.
+6. Add VS Code client-side bounded frame codec.
+7. Implement CompanionClient transport + hello/session establishment.
+8. Add bounded correlation, timeout, protocol-error, disconnect, and generation invalidation behavior.
+9. Add typed `healthGet()` and `companionStatus()`.
+10. Add focused unit tests.
+11. Add real transport tests against an already-running test Companion, including two independent clients.
+12. Audit that `extension.ts` and activation behavior are unchanged.
+13. Run full regression gate.
+14. Perform a read-only self-review against architecture/negative criteria.
+15. Update only Completion Evidence below. Do not mark M0.8 complete in `WORKPLAN.md`.
+
+## Protocol/client invariants
+
+- Client accepts no application response before a valid `hello.challenge` / `hello.ack` sequence.
+- Negotiated version is exactly v1 for this slice.
+- Challenge in ack must match the connection's challenge.
+- Session ID is connection-scoped and never reused after disconnect.
+- Response `requestId` must match exactly one current-generation pending request.
+- Response `sessionId` must equal the current session for session-bound responses.
+- Unknown request IDs, duplicate terminal responses, wrong-session responses, malformed frames, invalid UTF-8/JSON, oversized frames, and incompatible versions fail closed.
+- Pending requests are bounded at 32.
+- Request IDs are bounded to 64 UTF-8 bytes and generated by the client.
+- Every pending request settles at most once.
+- Terminal transport/protocol failure rejects all pending requests and clears all session state.
+- Client never treats endpoint knowledge, challenge, or session ID as OS authentication.
+- No client operation reads/writes Companion SQLite or ownership artifacts.
+- No public generic send/request escape hatch exists.
+
+## Failure behavior
+
+Define typed client failures sufficient to distinguish at least:
+- Companion unavailable/refused;
+- connection timeout;
+- request timeout;
+- incompatible protocol;
+- protocol violation/malformed response;
+- remote protocol error;
+- disconnected/closed client.
+
+Error objects/messages must not expose secrets or raw arbitrary payloads.
+
+A protocol violation closes the connection. A normal caller-requested disconnect is idempotent.
+
+## Test plan
+
+### Focused client tests
+
+- frame encode/decode: fragmented prefix/body, coalesced frames, zero/oversized, fatal UTF-8/JSON/non-object, truncated EOF, UTF-8 byte boundary;
+- handshake success;
+- wrong/incompatible challenge/version/type/shape fails closed;
+- absent Companion endpoint is typed/non-fatal;
+- health/status success;
+- timeout rejects and cleans pending state;
+- connection loss rejects all pending once;
+- unknown/stale/duplicate response cannot cross-correlate;
+- disconnect/dispose idempotency;
+- reconnect after terminal state creates a fresh generation/session;
+- two independent clients have isolated state.
+
+### Real transport
+
+On the host platform:
+- start one test Companion;
+- connect client A and complete hello + health/status;
+- connect client B to the same Companion and complete hello + health/status;
+- disconnect A and prove B remains responsive;
+- stop cleanly.
+
+Unix-specific real transport may be skipped on a Windows host only when the skip is explicit and static Unix path/transport tests remain present.
+
+### Regression gate
+
+Run from a clean install where practical:
+
+- `npm ci`
+- `npm ls --workspaces --depth=0`
+- contracts typecheck/tests if added
+- Companion build/typecheck/tests
+- VS Code compile/lint/tests; existing 92 tests must remain green in addition to new M0.8 tests
+- Cloud typecheck/tests; existing 73 tests remain green
+- domain typecheck
+- adapter SDK typecheck
+- native Windows IPC build
+- root `npm run validate`
+- `git diff --check`
+
+Record exact pass/fail/skip counts.
+
+## Negative acceptance criteria
+
+M0.8 fails if any of the following occurs:
+
+- VS Code becomes runtime/canonical authority.
+- `extension.ts` activation behavior is changed.
+- Companion is auto-started/installed/updated.
+- Client imports `apps/companion/src/**` in production code.
+- Endpoint/data-root formulas are independently duplicated in VS Code.
+- VS Code depends on the Windows native server-security package.
+- A TCP/HTTP/WebSocket fallback is added.
+- A generic public request/send/RPC/command/prompt API is exposed.
+- Client reads SQLite/ownership state.
+- Challenge/session is described or used as standalone authentication.
+- Legacy Telegram behavior is removed/migrated.
+- Automatic reconnect/restart orchestration is added.
+- Any M0.9+ feature is implemented.
+- Existing VS Code/Companion/Cloud regression behavior breaks.
 
 ## Stop conditions
 
 Stop and report instead of improvising if:
 
-- local checkout does not descend from merged M0.6 checkpoint `e29dd858b998fe2f5d319aadcb67b774a1c8e568`;
-- unrelated local changes are present;
-- a proposed implementation requires local TCP/HTTP/WebSocket;
-- the documented Windows security APIs cannot provide the required explicit per-user/logon-principal Named Pipe DACL through a narrowly scoped native boundary, or Unix cannot enforce the required UDS owner permissions;
-- implementation would require a generic RPC/command surface;
-- VS Code must be modified to make the protocol work;
-- IPC would open before M0.6 ownership/storage bootstrap;
-- IPC lifecycle would outlive or compete with the authoritative Companion lifecycle;
-- SQLite would gain another canonical writer;
-- implementation requires agent/session/source-resolution state;
-- a locked A–E architecture invariant or diagram 02/10/11 conflicts with the slice.
+- shared pure locator extraction would require moving ownership, filesystem mutation, SQLite, secure-store, or runtime authority into contracts;
+- the client cannot locate the canonical endpoint without duplicating implementation or crossing app boundaries;
+- M0.7 wire behavior must change to make the client work;
+- a required behavior needs a new IPC request beyond `hello`, `health.get`, `companion.status`;
+- VS Code activation must change to make the slice testable;
+- the implementation would require `@far-away/windows-ipc-security` in VS Code;
+- a platform requires local TCP fallback;
+- tests cannot prove request/session invalidation without broadening into M0.10;
+- any locked architecture/diagram conflicts with the real repository.
+
+## Acceptance criteria
+
+- [x] Baseline/branch/clean-tree preconditions recorded.
+- [x] Diagrams 02, 10, and 11 reviewed.
+- [x] Pure canonical locator logic is shared without moving authority out of Companion.
+- [x] Companion M0.7 endpoint/path behavior remains unchanged.
+- [x] VS Code has a bounded CompanionClient with no generic request escape hatch.
+- [x] Real v1 hello/challenge/session handshake works.
+- [x] `health.get` works through typed client API.
+- [x] `companion.status` works through typed client API.
+- [x] Missing Companion is typed and non-fatal.
+- [x] Timeouts are finite and tested.
+- [x] Disconnect invalidates session/pending state.
+- [x] Stale/unknown/duplicate responses cannot cross-correlate.
+- [x] Two independent clients can share one Companion without shared client authority/state.
+- [x] No activation/M0.9 behavior changed.
+- [x] Existing Telegram behavior remains green.
+- [x] No local TCP/generic command/source-operation surface exists.
+- [x] Full regression gate passes.
+- [x] Negative-scope audit passes.
+- [x] Independent review passes before M0.8 is checked in `WORKPLAN.md`.
 
 ## Completion Evidence
 
-**Status:** COMPLETE — independent re-review PASS.
+**Status:** CLOSED / PASS. Independent M0.8 re-review passed; acceptance boxes and `WORKPLAN.md` are checked.
 
-- Starting checkout: `planning/m0.7-ipc` at `5b8ebe7a0587ba3cbc14a2fc31b1911b1e295d90`; the M0.6 merge `e29dd858b998fe2f5d319aadcb67b774a1c8e568` is an ancestor; the starting working tree was clean.
-- Changed files: Companion application, endpoint, framing, protocol, transport, storage ownership assertion, executable integration, and three focused test files under `apps/companion/`; explicit v1 DTOs in `packages/contracts/src/index.ts`; the narrow `packages/windows-ipc-security/` native package; root and Companion package manifests and root lockfile; this Completion Evidence section. No VS Code, Cloud, domain, adapter SDK, architecture, or diagram file changed.
-- Endpoint/transport: Windows uses a deterministic `\\.\pipe\far-away-<32 hex SHA-256 prefix>` locator from the normalized, lowercased selected data-root path. Unix uses `companion.sock` inside the selected data root. Neither is a credential. The server exposes no TCP, HTTP, WebSocket, or gRPC listener.
-- Windows OS boundary: the native Node-API addon obtains the current process token's user SID, converts `D:P(A;;GA;;;<current-user-SID>)` to a security descriptor, passes it explicitly to `CreateNamedPipeW`, requests `PIPE_REJECT_REMOTE_CLIENTS`, and refuses startup unless `GetSecurityInfo` confirms a protected DACL with exactly one current-user allow ACE. The Windows focused test observed `{ protectedDacl: true, currentUserOnly: true, aceCount: 1, rejectRemoteClients: true }`. The native code handles protected pipe creation/access control and the necessary raw pipe byte I/O; it has no Far Away protocol, domain, agent, cloud, or identity logic and uses no private Node/libuv handle API.
-- Unix OS boundary: code requires a real current-user data-root directory, restricts it to `0700`, binds a UDS, sets and verifies socket mode `0600`, and probes an existing socket before removing it only after the M0.6 ownership assertion. Two Unix real-transport tests cover mode and live/stale endpoint behavior but were skipped on this Windows host; Unix behavior was not executed here.
-- Framing: four-byte unsigned big-endian payload length, fatal UTF-8 JSON object decoding, and a 64 KiB byte maximum. Focused tests passed for UTF-8 byte counts, fragmented prefix/body, coalesced frames, and zero, oversized, truncated, invalid UTF-8/JSON, and non-object frames.
-- Protocol: only `hello`, `health.get`, and `companion.status` requests plus their explicit v1 responses and sanitized typed errors. `hello` negotiates v1 before read-only requests; incompatible ranges/versions, unknown messages, invalid sessions, and duplicate in-flight IDs fail closed. Request IDs are limited to 64 UTF-8 bytes and 32 simultaneous in-flight requests per connection.
-- Session: each OS-authorized connection gets a fresh 32-byte random challenge; successful `hello` binds it to v1 and a fresh UUID session ID. Reconnect changes both; stale challenge/session material is rejected and never stored in SQLite. Challenge echo and session ID provide protocol freshness and replay isolation, not standalone client authentication; the OS ACL/UDS permissions define the local principal boundary.
-- Read-only surfaces: `health.get` returns only `service: responsive` and bounded uptime seconds. `companion.status` returns only runtime state, transport kind, and v1 metadata. Focused tests compared exact response objects and checked canonical SQLite migration count/schema version before and after requests; handlers contain no storage dependency.
-- Lifecycle: startup is ownership → SQLite/WAL/migrations → IPC bind/security check → READY. Shutdown stops accepting and closes IPC clients before SQLite closes and ownership releases. A real occupied endpoint prevented READY and produced database-close then ownership-release events; repeated/concurrent stop remained idempotent. A newly injected `ipc-bound` hook failure produced IPC-close → database-close → ownership-release events, never reached READY, left the endpoint unavailable, and permitted a subsequent startup and client handshake.
-- Independent-review BLOCKER correction: Windows `disconnect()` now only marks/cancels the client; it never joins a reader from a data callback. Native data and control events wait at the bounded 256-event Node-API queue rather than dropping another client's data. A queued close event triggers client reclamation after it reaches JavaScript; server shutdown sets `closing` before joining readers. The Windows regression test blocked JavaScript while a child flooded the real Named Pipe, observed `queueFullCount > 0`, sent a malformed zero-length frame, and then confirmed a second real client received `health.get`, Companion remained READY, native clients were reclaimed, and shutdown completed.
-- Independent-review MAJOR correction: initialization failure after IPC bind now calls the IPC-first disposal path before closing SQLite and releasing ownership. The injected post-bind failure test verified ordering, no READY, no listening endpoint, and successful restart/bind.
-- Independent-review MINOR correction: the Windows close event now reaps its finished native client without awaiting a new connection. A dedicated clean-disconnect test verified native client count returned to zero while Companion remained READY; the pressure test also verified reclamation after malformed closure.
-- Focused/local result on Windows Node 22.17.1: Companion suite **37 passed, 0 failed, 4 skipped** (two Unix-only tests and the two existing Windows signal tests). The focused real transport file passed **8, skipped 2**; explicit DACL, saturated queue/malformed-client isolation, post-bind failure unwind, and clean-disconnect reclamation tests passed.
-- Full gate after correction: clean root `npm ci` passed; `npm ls --workspaces --depth=0` listed the original six plus the native workspace; native build passed with node-gyp/Visual Studio; Companion build/typecheck/tests and domain/contracts/adapter SDK typechecks passed; VS Code compile/lint and **92 tests on VS Code 1.138.0** passed; Cloud typecheck and **73 tests across 6 files** passed; aggregate `npm run validate` passed. `git diff --check` passed.
-- Read-only architecture/scope review: diagrams 02, 10, and 11 were reread. Companion remains the only local runtime/IPC owner; VS Code remains a future client; all IPC stays in TB1 over Named Pipe/UDS; no source, cloud, provider, or mobile authority enters the protocol. No M0.8 client, agent adapters, source resolution, relay, Telegram change, identity enrollment, D1–D5, iOS, generic command surface, or canonical diagram/architecture edit was introduced.
-- Platform limitation: real Unix UDS `0600` and stale-socket tests could not execute on this Windows host and are explicitly skipped as allowed by this slice. The three independent-review findings were independently re-reviewed and confirmed RESOLVED; no new finding, GAP, or CONFLICT remains. M0.7 is closed.
+- Start: clean `planning/m0.8-vscode-companion-client` at `1db5525e913e2efe4e157d8630e3bcf06edfcdc4`; only the M0.8 planning commit follows ancestor `328bbd8`.
+- Pre-change baseline: root `npm run validate` passed; contracts, domain, adapter SDK, Cloud and Companion typechecks, Companion build, VS Code compile/lint, and Windows native IPC build passed. Companion: 37 pass, 0 fail, 4 skip (41 total). VS Code 1.138.0: 92 pass, 0 fail, 0 skip. Cloud: 73 pass, 0 fail, 0 skip (6 files).
+- Changed implementation paths: `packages/contracts/src/index.ts`, new `packages/contracts/src/local-locator.ts`, `packages/contracts/package.json`, `apps/companion/src/paths.ts`, `apps/companion/src/ipc-endpoint.ts`, `apps/companion/package.json`, new `apps/vscode/src/companion/CompanionClient.ts` and `ipc-frame.ts`, `apps/vscode/package.json`, root `package.json`, and `package-lock.json`. New tests: `apps/vscode/src/test/companion/CompanionClient.test.ts`, `ipc-frame.test.ts`, and `real-transport.test.ts`.
+- Shared locator: contracts now owns only pure data-root selection and M0.7 Named Pipe/UDS derivation. Companion's existing path and endpoint imports delegate to it; SQLite and ownership paths, filesystem mutation, IPC ownership, and native security remain Companion-local. Golden Windows, macOS, Linux/XDG, and Unix endpoint tests pass; existing Companion locator/IPC tests pass unchanged.
+- Client API: `connect()`, typed `healthGet()`, typed `companionStatus()`, `disconnect()`, and `dispose()`. It selects the shared canonical endpoint and uses Node local sockets only. It validates `hello.challenge`, sends exact v1 `hello`, accepts only matching `hello.ack`, then binds the returned session to that connection.
+- Correlation/lifecycle: generated unique IDs remain at most 64 UTF-8 bytes; at most 32 requests are pending. Finite connect/handshake and request timers, exact response shape/session/ID checks, sanitized typed errors, terminal fail-closed behavior, pending rejection/cleanup, and generation invalidation are tested. Missing/closed endpoint returns typed `unavailable`; no startup, UI, Telegram mutation, or network fallback occurs.
+- Real transport: on Windows, a test Companion process served two independent CompanionClient instances through the actual Named Pipe. A completed hello, health and status reads; B completed hello/read, then stayed responsive after A disconnected. Both clients and the test Companion stopped cleanly.
+- Focused tests: 17 pass, 0 fail, 0 skip. Final clean root `npm ci` installed 404 packages; `npm ls --workspaces --depth=0` passed. Contracts typecheck/build passed; no contracts test suite was added. Companion build/typecheck/tests: 37 pass, 0 fail, 4 skip (41 total). VS Code compile/lint/complete VS Code 1.138.0 suite: 109 pass, 0 fail, 0 skip (92 existing plus 17 new). Cloud typecheck/complete suite: 73 pass, 0 fail, 0 skip (6 files). Domain and adapter SDK typechecks, native Windows IPC build, root `npm run validate`, and `git diff --check` passed.
+- Independent review correction: both P1 findings were reproduced. With ignored contracts `dist` temporarily absent, direct Node resolution failed with `MODULE_NOT_FOUND` and independent `npm run companion:test` failed because its build had not produced contracts runtime JS. The Companion manifest and lockfile lacked its runtime `@far-away/contracts` dependency. The correction adds that dependency to both and uses Companion `prebuild` to build contracts; VS Code `precompile` builds contracts and `preextension:test` compiles before its independent test command. No locator or IPC wire logic changed.
+- Cold lifecycle proof: after explicitly removing `packages/contracts/dist`, clean root `npm ci` succeeded (404 packages) and left that directory absent. Without manual contracts build or root validate, independent `npm run companion:test` invoked contracts build through `prebuild` and passed 37/0/4 (41 total). Contracts `dist` was removed again; independent `npm run extension:test` invoked `preextension:test` → `compile` → `precompile` → contracts build and passed 109/0/0 on VS Code 1.138.0. A separate focused M0.8 run passed 17/0/0.
+- Dependency closure: `apps/companion/package.json` and `package-lock.json` both declare `@far-away/contracts: 0.0.1`; `npm ls --workspace=@far-away/companion --omit=dev --depth=0` lists contracts and Windows IPC as Companion production dependencies. Node resolution from the Companion package resolves the built contracts `dist/index.js` and its locator. The current M0 packaging is private npm workspaces; isolated publication outside that workspace is unsupported and was not claimed. Final `npm ls --workspaces --depth=0`, contracts/Companion/Cloud/domain/adapter SDK typechecks, contracts/Companion/native Windows builds, VS Code compile/lint, complete Companion 37/0/4, VS Code 109/0/0, Cloud 73/0/0 (6 files), and root `npm run validate` passed.
+- Preservation: `apps/vscode/src/extension.ts`, activation events, Telegram code, Cloud, domain, adapter SDK, Windows native security code, architecture and diagrams have no diff. Existing 92 VS Code tests remain green.
+- Reviewed diagrams: `02-local-component.mmd`, `10-deployment-topology.mmd`, and `11-trust-boundaries.mmd`. Read-only negative-scope audit found no Companion implementation import in VS Code, duplicated locator formula, public generic request/send API, TCP/HTTP/WebSocket fallback, automatic reconnect, SQLite/ownership access from VS Code, Windows security-package import in VS Code, M0.9+ change, or challenge/session-as-authentication claim.
+- Platform limits: Windows Named Pipe transport was executed. Unix-only Companion tests (2) and executable signal-handler tests (2) are skipped on Windows; Unix locator semantics were tested statically. Isolated package publication outside the root npm workspace was not tested. No architecture GAP/CONFLICT was found within M0.8.
+- Independent re-review: both corrected P1 findings are CLOSED; the review found 0 BLOCKER, 0 MAJOR, 0 MINOR, 0 GAP, and 0 CONFLICT findings and returned PASS for M0.8 closure.
+
+Do not mark M0.8 complete in `WORKPLAN.md` until this evidence has passed independent review.
