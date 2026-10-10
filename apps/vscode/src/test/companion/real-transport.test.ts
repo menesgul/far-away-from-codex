@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { localDataRoot, localEndpoint } from '@far-away/contracts';
 import { CompanionClient } from '../../companion/CompanionClient';
+import { createCompanionStatusProjection, type CompanionStatusText } from '../../companion/CompanionStatusProjection';
 
 suite('CompanionClient real local transport', () => {
   test('shared locator preserves Windows, macOS, Linux/XDG, and UDS semantics', () => {
@@ -51,6 +52,10 @@ suite('CompanionClient real local transport', () => {
         ['--input-type=module', '-e', script, root], { stdio: ['pipe', 'pipe', 'pipe'] });
       const a = new CompanionClient({ paths: { testDataRoot: root } });
       const b = new CompanionClient({ paths: { testDataRoot: root } });
+      const aStates: CompanionStatusText[] = [];
+      const bStates: CompanionStatusText[] = [];
+      const aProjection = createCompanionStatusProjection(a, (state) => aStates.push(state));
+      const bProjection = createCompanionStatusProjection(b, (state) => bStates.push(state));
       let output = '';
       let errors = '';
       child.stdout.on('data', (data: Buffer) => { output += data.toString('utf8'); });
@@ -73,11 +78,24 @@ suite('CompanionClient real local transport', () => {
         });
         await b.connect();
         assert.strictEqual((await b.healthGet()).service, 'responsive');
-        a.disconnect();
+        await aProjection.probe();
+        await bProjection.probe();
+        assert.strictEqual(aStates.at(-1), 'Companion: Connected (last check)');
+        assert.strictEqual(bStates.at(-1), 'Companion: Connected (last check)');
+        aProjection.dispose();
         assert.strictEqual((await b.companionStatus()).state, 'ready');
+        await bProjection.probe();
+        assert.strictEqual(bStates.at(-1), 'Companion: Connected (last check)');
+        child.stdin.write('STOP\n');
+        if (child.exitCode === null) {
+          await new Promise<void>((done) => child.once('exit', () => done()));
+        }
+        await assert.rejects(b.companionStatus(), { code: 'disconnected' });
+        // The prior result remains explicitly historical after the actual socket closes.
+        assert.strictEqual(bStates.at(-1), 'Companion: Connected (last check)');
       } finally {
-        a.disconnect();
-        b.disconnect();
+        aProjection.dispose();
+        bProjection.dispose();
         if (child.exitCode === null) {
           child.stdin.write('STOP\n');
           try { await until(() => output.includes('STOPPED')); }

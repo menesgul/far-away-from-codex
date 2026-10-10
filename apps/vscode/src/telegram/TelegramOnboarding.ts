@@ -19,7 +19,7 @@ export interface TelegramOnboardingDependencies {
 }
 
 export interface TelegramOnboarding {
-	maybeShow(connectionState: TelegramConnectionState): Promise<void>;
+	maybeShow(connectionState: TelegramConnectionState, isCurrent?: () => boolean): Promise<void>;
 	dispose(): void;
 }
 
@@ -27,6 +27,7 @@ export interface TelegramActivationOnboardingDependencies {
 	refreshConnectionState(): Promise<void>;
 	getConnectionState(): TelegramConnectionState;
 	onboarding: TelegramOnboarding;
+	isCurrent?: () => boolean;
 }
 
 /**
@@ -42,7 +43,7 @@ export function createTelegramOnboarding(
 	let lifecycleRevision = 0;
 	let disposed = false;
 
-	const maybeShow = (connectionState: TelegramConnectionState): Promise<void> => {
+	const maybeShow = (connectionState: TelegramConnectionState, isCurrent: () => boolean = () => true): Promise<void> => {
 		if (
 			disposed
 			|| connectionState !== 'disconnected'
@@ -65,7 +66,7 @@ export function createTelegramOnboarding(
 			// Once the prompt resolves, including normal dismissal, persist before
 			// permitting any action so reload cannot turn it into a repeated prompt.
 			await dependencies.globalState.update(TELEGRAM_ONBOARDING_SHOWN_KEY, true);
-			if (disposed || lifecycleRevision !== attemptRevision) {
+			if (disposed || lifecycleRevision !== attemptRevision || !isCurrent()) {
 				return;
 			}
 			if (selection === TELEGRAM_ONBOARDING_CONNECT_BUTTON) {
@@ -96,5 +97,9 @@ export async function runTelegramActivationOnboarding(
 	dependencies: TelegramActivationOnboardingDependencies,
 ): Promise<void> {
 	await dependencies.refreshConnectionState();
-	await dependencies.onboarding.maybeShow(dependencies.getConnectionState());
+	if (dependencies.isCurrent) {
+		await dependencies.onboarding.maybeShow(dependencies.getConnectionState(), dependencies.isCurrent);
+	} else {
+		await dependencies.onboarding.maybeShow(dependencies.getConnectionState());
+	}
 }

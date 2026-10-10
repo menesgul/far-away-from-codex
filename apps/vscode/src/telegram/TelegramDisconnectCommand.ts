@@ -2,7 +2,7 @@ import type { InstallationCredentialStore } from '../backend/BackendClient';
 import type { TelegramConnectionState } from '../state/TelegramConnectionState';
 
 export interface TelegramDisconnectClient {
-	disconnectTelegram(credential: string): Promise<void>;
+	disconnectTelegram(credential: string, owner?: number): Promise<void>;
 }
 
 export interface TelegramDisconnectCommandDependencies {
@@ -14,17 +14,17 @@ export interface TelegramDisconnectCommandDependencies {
 	getConnectionStateRevision(): number;
 	applyConnectionState(state: TelegramConnectionState): void;
 	forceAlertsOff(): void;
-	cancelActivePairingSession(): void;
+	cancelActivePairingSession(): boolean | void;
 	isCredentialRejected(error: unknown): boolean;
 	/** Local identity recovery; this is not a confirmed Telegram disconnect. */
-	recoverRejectedCredential(): Promise<void>;
+	recoverRejectedCredential(owner?: number): Promise<void>;
 	showDisconnected(): void;
 	showAlreadyDisconnected(): void;
 	showError(message: string): void;
 }
 
 export interface TelegramDisconnectCommand {
-	execute(): Promise<void>;
+	execute(owner?: number): Promise<void>;
 }
 
 /**
@@ -37,35 +37,35 @@ export interface TelegramDisconnectCommand {
 export function createTelegramDisconnectCommand(
 	dependencies: TelegramDisconnectCommandDependencies
 ): TelegramDisconnectCommand {
-	let disconnectInFlight: Promise<void> | undefined;
+	let disconnectInFlight: { owner: number; promise: Promise<void> } | undefined;
 
-	const execute = (): Promise<void> => {
-		if (disconnectInFlight !== undefined) {
-			return disconnectInFlight;
+	const execute = (owner = 0): Promise<void> => {
+		if (disconnectInFlight?.owner === owner) {
+			return disconnectInFlight.promise;
 		}
 
-		const attempt = executeOnce();
-		disconnectInFlight = attempt;
+		const attempt = executeOnce(owner);
+		disconnectInFlight = { owner, promise: attempt };
 		void attempt.then(() => {
-			if (disconnectInFlight === attempt) {
+			if (disconnectInFlight?.promise === attempt) {
 				disconnectInFlight = undefined;
 			}
 		}, () => {
-			if (disconnectInFlight === attempt) {
+			if (disconnectInFlight?.promise === attempt) {
 				disconnectInFlight = undefined;
 			}
 		});
 		return attempt;
 	};
 
-	const executeOnce = async (): Promise<void> => {
+	const executeOnce = async (owner: number): Promise<void> => {
 		// This fence and cancellation happen before looking up a credential or
 		// issuing DELETE. They make every older GET/session callback stale now.
 		dependencies.beginAuthoritativeDisconnect();
 		dependencies.forceAlertsOff();
-		dependencies.cancelActivePairingSession();
+		const hadActivePairing = dependencies.cancelActivePairingSession() === true;
 
-		if (dependencies.getConnectionState() === 'disconnected') {
+		if (dependencies.getConnectionState() === 'disconnected' && !hadActivePairing) {
 			dependencies.showAlreadyDisconnected();
 			return;
 		}
@@ -78,9 +78,21 @@ export function createTelegramDisconnectCommand(
 		try {
 			credential = await dependencies.store.getInstallationCredential();
 			if (credential === undefined) {
-				throw new Error('No anonymous installation is registered.');
+				// The authoritative resolver also maps no local installation to
+				// disconnected. Cold lazy entry must retain the warmed command's
+				// informational behavior without waiting for a cloud request.
+				if (dependencies.getConnectionStateRevision() === disconnectRevision) {
+					dependencies.applyConnectionState('disconnected');
+					dependencies.showAlreadyDisconnected();
+				}
+				return;
 			}
-			await dependencies.client.disconnectTelegram(credential);
+			// Credential lookup may have been pending when a newer Connect or
+			// refresh took ownership. Never issue DELETE for a stale Disconnect.
+			if (dependencies.getConnectionStateRevision() !== disconnectRevision) {
+				return;
+			}
+			await dependencies.client.disconnectTelegram(credential, owner);
 			if (dependencies.getConnectionStateRevision() !== disconnectRevision) {
 				return;
 			}
@@ -94,7 +106,7 @@ export function createTelegramDisconnectCommand(
 
 			if (dependencies.isCredentialRejected(error)) {
 				try {
-					await dependencies.recoverRejectedCredential();
+					await dependencies.recoverRejectedCredential(owner);
 				} catch {
 					// The credential cannot be trusted, but a failed local cleanup must
 					// not turn an identity-recovery outcome into a claimed disconnect.

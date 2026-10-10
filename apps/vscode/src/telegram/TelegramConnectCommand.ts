@@ -49,7 +49,7 @@ export interface TelegramConnectCommandDependencies {
 export interface TelegramConnectCommand {
 	execute(intent?: TelegramConnectIntent): Promise<void>;
 	/** Cancels the current local attempt without changing server-side pairing state. */
-	cancelActiveSession(): void;
+	cancelActiveSession(): boolean;
 	dispose(): void;
 	getActiveSession(): TelegramConnectSession | undefined;
 }
@@ -114,7 +114,10 @@ export function createTelegramConnectCommand(
 					return;
 				}
 				if (state === 'connected') {
-					dependencies.showConnected();
+					if (sessionRevision === pairingSessionRevision
+						&& sessionConnectionStateRevision === dependencies.getConnectionStateRevision()) {
+						dependencies.showConnected();
+					}
 					if (
 						activeIntent === 'enable-alerts-after-connect'
 						&& sessionRevision === pairingSessionRevision
@@ -188,8 +191,8 @@ export function createTelegramConnectCommand(
 		} catch (error) {
 			if (activePairingSession === session) {
 				session.cancel();
+				dependencies.showError(safeErrorMessage(error, 'Could not connect Telegram.'));
 			}
-			dependencies.showError(safeErrorMessage(error, 'Could not connect Telegram.'));
 		}
 	};
 
@@ -201,7 +204,9 @@ export function createTelegramConnectCommand(
 			pairingSessionRevision += 1;
 			const session = activePairingSession;
 			activePairingSession = undefined;
+			const hadActivePairing = session?.state === 'starting' || session?.state === 'waiting';
 			session?.cancel();
+			return hadActivePairing;
 		},
 		dispose: () => {
 			pairingSessionRevision += 1;
