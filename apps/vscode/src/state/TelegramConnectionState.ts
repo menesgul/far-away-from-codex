@@ -12,6 +12,7 @@ export interface TelegramConnectionClient {
 export async function resolveTelegramConnectionState(
 	store: InstallationCredentialStore,
 	client: TelegramConnectionClient,
+	mayRecoverRejectedCredential: () => boolean = () => true,
 ): Promise<TelegramConnectionState> {
 	let credential: string | undefined;
 	try {
@@ -28,6 +29,7 @@ export async function resolveTelegramConnectionState(
 		return (await client.getTelegramConnection(credential)) ? 'connected' : 'disconnected';
 	} catch (error) {
 		if (error instanceof InstallationCredentialRejectedError) {
+			if (!mayRecoverRejectedCredential()) { return 'unknown'; }
 			try {
 				await store.deleteInstallationCredential();
 				return 'disconnected';

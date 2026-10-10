@@ -1,7 +1,7 @@
 import type { TelegramConnectionState } from './TelegramConnectionState';
 
 export interface TelegramConnectionStateRefreshDependencies {
-	resolveConnectionState(): Promise<TelegramConnectionState>;
+	resolveConnectionState(owner?: number): Promise<TelegramConnectionState>;
 	beginAuthoritativeRefresh(): number;
 	getConnectionStateRevision(): number;
 	applyConnectionState(state: TelegramConnectionState): void;
@@ -14,24 +14,24 @@ export interface TelegramConnectionStateRefreshDependencies {
  */
 export function createTelegramConnectionStateRefresh(
 	dependencies: TelegramConnectionStateRefreshDependencies
-): () => Promise<void> {
-	let inFlight: Promise<void> | undefined;
+): (owner?: number) => Promise<void> {
+	let inFlight: { owner: number; promise: Promise<void> } | undefined;
 
-	return (): Promise<void> => {
-		if (inFlight !== undefined) {
-			return inFlight;
+	return (owner = 0): Promise<void> => {
+		if (inFlight?.owner === owner) {
+			return inFlight.promise;
 		}
 
 		const refreshRevision = dependencies.beginAuthoritativeRefresh();
-		const refresh = dependencies.resolveConnectionState()
+		const refresh = dependencies.resolveConnectionState(owner)
 			.then((nextState) => {
 				if (dependencies.getConnectionStateRevision() === refreshRevision) {
 					dependencies.applyConnectionState(nextState);
 				}
 			});
-		inFlight = refresh;
+		inFlight = { owner, promise: refresh };
 		void refresh.finally(() => {
-			if (inFlight === refresh) {
+			if (inFlight?.promise === refresh) {
 				inFlight = undefined;
 			}
 		});

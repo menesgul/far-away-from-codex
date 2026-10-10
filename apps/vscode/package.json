@@ -10,12 +10,13 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "onStartupFinished"
-  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "far-away-from-codex.refreshCompanionStatus",
+        "title": "Far Away From Codex: Refresh Companion Status"
+      },
       {
         "command": "far-away-from-codex.toggleAlerts",
         "title": "Codex Alerts: Toggle"

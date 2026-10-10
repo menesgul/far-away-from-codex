@@ -5,9 +5,10 @@ export interface TelegramAlertsToggleCommandDependencies {
 	getConnectionState(): TelegramConnectionState;
 	getAlertsEnabled(): boolean;
 	setAlertsEnabled(enabled: boolean): void;
-	refreshConnectionState(): Promise<void>;
+	refreshConnectionState(owner?: number): Promise<void>;
 	showDisconnectedPrompt(): Promise<'connect' | 'cancel' | undefined>;
-	connectTelegram(intent: TelegramConnectIntent): Promise<void>;
+	connectTelegram(intent: TelegramConnectIntent, owner?: number): Promise<void>;
+	isCurrentOwner?(owner: number): boolean;
 }
 
 /**
@@ -17,11 +18,11 @@ export interface TelegramAlertsToggleCommandDependencies {
  */
 export function createTelegramAlertsToggleCommand(
 	dependencies: TelegramAlertsToggleCommandDependencies
-): () => Promise<void> {
-	return async () => {
+): (owner?: number) => Promise<void> {
+	return async (owner = 0) => {
 		const connectionState = dependencies.getConnectionState();
 		if (connectionState === 'unknown') {
-			await dependencies.refreshConnectionState();
+			await dependencies.refreshConnectionState(owner);
 			// An unknown-state click is solely an authoritative retry. The result
 			// changes the rendered state; a separate click performs its action.
 			return;
@@ -34,7 +35,8 @@ export function createTelegramAlertsToggleCommand(
 
 		if (connectionState === 'disconnected') {
 			if (await dependencies.showDisconnectedPrompt() === 'connect') {
-				await dependencies.connectTelegram('enable-alerts-after-connect');
+				if (dependencies.isCurrentOwner?.(owner) === false) { return; }
+				await dependencies.connectTelegram('enable-alerts-after-connect', owner);
 			}
 		}
 	};
