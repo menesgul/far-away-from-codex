@@ -20,6 +20,8 @@ export class IpcFrameDecoder {
   private bodyBytes = 0;
   private readonly decoder = new TextDecoder('utf-8', { fatal: true });
 
+  get hasPartialFrame(): boolean { return this.prefixBytes !== 0 || this.body !== undefined; }
+
   push(chunk: Buffer): object[] {
     const frames: object[] = [];
     let offset = 0;

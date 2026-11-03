@@ -20,6 +20,16 @@ export interface IpcSessionOptions {
   readonly transport: LocalEndpoint['transport'];
   readonly runtimeState: () => CompanionRuntimeState;
   readonly uptimeSeconds?: () => number;
+  readonly helloTimeoutMs?: number;
+  readonly frameTimeoutMs?: number;
+}
+
+function deadline(value: number | undefined, fallback: number): number {
+  const selected = value ?? fallback;
+  if (!Number.isSafeInteger(selected) || selected <= 0 || selected > 120_000) {
+    throw new RangeError('IPC deadline must be a positive integer at most 120000 ms');
+  }
+  return selected;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -62,8 +72,13 @@ export class IpcProtocolSession {
   private readonly inFlight = new Set<string>();
   private sessionId?: string;
   private closed = false;
+  private readonly helloTimer: ReturnType<typeof setTimeout>;
+  private frameTimer?: ReturnType<typeof setTimeout>;
+  private readonly frameTimeoutMs: number;
 
   constructor(private readonly connection: IpcByteConnection, private readonly options: IpcSessionOptions) {
+    this.frameTimeoutMs = deadline(options.frameTimeoutMs, 5_000);
+    this.helloTimer = setTimeout(() => this.close(), deadline(options.helloTimeoutMs, 10_000));
     const announcement: IpcHelloChallenge = { type: 'hello.challenge', version: IPC_V1, challenge: this.challenge };
     this.send(announcement);
   }
@@ -73,6 +88,12 @@ export class IpcProtocolSession {
     let messages: object[];
     try { messages = this.frames.push(data); }
     catch { this.close(); return; }
+    if (this.frames.hasPartialFrame) {
+      this.frameTimer ??= setTimeout(() => this.close(), this.frameTimeoutMs);
+    } else {
+      clearTimeout(this.frameTimer);
+      this.frameTimer = undefined;
+    }
     for (const message of messages) {
       if (this.closed) break;
       this.handle(record(message)!);
@@ -83,6 +104,8 @@ export class IpcProtocolSession {
     if (this.closed) return;
     try { this.frames.end(); } catch { this.close(); return; }
     this.closed = true;
+    clearTimeout(this.helloTimer);
+    clearTimeout(this.frameTimer);
   }
 
   stop(): void { this.close(); }
@@ -107,6 +130,7 @@ export class IpcProtocolSession {
       if (!compatibleRange(message.supported)) { this.error('INCOMPATIBLE_VERSION', id); return; }
       if (message.challenge !== this.challenge) { this.error('INVALID_REQUEST', id); return; }
       this.sessionId = randomUUID();
+      clearTimeout(this.helloTimer);
       const reply: IpcHelloAck = {
         type: 'hello.ack', version: IPC_V1, requestId: id,
         challenge: this.challenge, sessionId: this.sessionId,
@@ -170,6 +194,8 @@ export class IpcProtocolSession {
   private close(): void {
     if (this.closed) return;
     this.closed = true;
+    clearTimeout(this.helloTimer);
+    clearTimeout(this.frameTimer);
     this.inFlight.clear();
     this.connection.close();
   }

@@ -6,7 +6,7 @@
 
 ## Status
 
-**PLANNED — NOT IMPLEMENTED.**
+**IN PROGRESS — locally implemented and validated; focused review passed; both CI OS jobs remain unverified.**
 
 Canonical baseline: merged `main` at the start of execution; record its exact SHA in Completion Evidence. M0.9 is checked complete in `WORKPLAN.md`. Its former executable plan and review log are archived at `docs/milestones/M0.9.md`. This document does not authorize implementation of future milestones.
 
@@ -201,35 +201,48 @@ Stop and report before continuing if:
 
 ## Acceptance criteria
 
-- [ ] Baseline SHA, diagram/decision review and existing-vs-missing coverage matrix recorded.
-- [ ] Multiple real clients share one Companion without response/authority crossover.
-- [ ] Malformed/disconnected client cannot disrupt healthy peer.
-- [ ] Concurrent Companion startup cannot create a second owner/writer.
-- [ ] Shutdown and restart release/reacquire resources safely.
-- [ ] Same-root restart preserves implemented SQLite schema/WAL/state.
-- [ ] Old IPC sessions fail closed; fresh handshake succeeds.
-- [ ] VS Code clients remain lifecycle-independent and non-authoritative.
-- [ ] Narrow architecture guards protect actual M0 boundaries.
-- [ ] Existing Telegram/VS Code/Cloud regressions pass.
+- [x] Baseline SHA, diagram/decision review and existing-vs-missing coverage matrix recorded.
+- [x] Multiple real clients share one Companion without response/authority crossover.
+- [x] Malformed/disconnected client cannot disrupt healthy peer.
+- [x] Concurrent Companion startup cannot create a second owner/writer.
+- [x] Shutdown and restart release/reacquire resources safely.
+- [x] Same-root restart preserves implemented SQLite schema/WAL/state.
+- [x] Old IPC sessions fail closed; fresh handshake succeeds.
+- [x] VS Code clients remain lifecycle-independent and non-authoritative.
+- [x] Narrow architecture guards protect actual M0 boundaries.
+- [x] Existing Telegram/VS Code/Cloud regressions pass.
 - [ ] Full local validation and both CI OS jobs pass with skip accounting.
-- [ ] Independent review has no unresolved blocking findings.
+- [x] Independent review of the latest corrections has no unresolved blocking findings.
 - [ ] `WORKPLAN.md` M0.10 checked only after evidence/review.
 
 ## Completion Evidence
 
-**NOT STARTED.** During implementation append short, dated evidence here, preserving failures and corrective retests:
+2026-10-14, M0.10 local execution evidence (retain this record until CI can verify the uncommitted implementation):
 
-- Branch / baseline SHA:
-- Reviewed diagrams / locked decisions:
-- Existing vs missing coverage matrix:
-- Focused RED tests and intended regression:
-- Production changes (if any) and why:
-- Focused GREEN tests:
-- Root `npm run validate` totals / environment:
-- Windows and Ubuntu CI links / skips:
-- Independent reviewer findings / resolutions:
-- Residual limitations / deferred Phase B–E obligations:
-- Final gate decision:
+- Branch / baseline SHA: `test/m0-10-multi-client-restart`, created from clean `main` at `9248f5357fb218c76b246e2f701a37d81e86e54b`. `git ls-remote origin refs/heads/main` confirmed the same tip. M0.9 was checked complete before edits. No commit, push, or PR was made.
+- Reviewed architecture: `AGENTS.md`, `ARCHITECTURE.md`, `WORKPLAN.md`, this entire active plan, and diagrams `02-local-component`, `05-permission-round-trip`, `06-offline-reconnect`, `07-multi-device-race`, `10-deployment-topology`, `11-trust-boundaries`. The linked locked Notion B2, B3, B4, B5, and C4 decisions were fetched and reviewed. B5's full client enrollment and B2/C4 source recovery remain future obligations.
+- Baseline Windows x64, Node v22.17.1: `npm run validate` exit 0. Companion 37 pass / 4 skip / 0 fail; pinned VS Code 1.138.0 integration 164 pass; Cloud 73 pass. Four Companion skips were two Unix UDS tests and SIGINT/SIGTERM process-signal tests that Windows `child.kill` cannot exercise. Cloud test runner warned that local Telegram secrets were absent; its tests passed.
+
+| Required category | Existing and proven at baseline | Missing and in scope, addressed in this branch | Future functionality not yet implemented |
+| --- | --- | --- | --- |
+| A. Clients and correlation | `ipc-server.test.ts`: “real local transport serves two clients; malformed/disconnected peer is isolated…”; `ipc-protocol.test.ts`: “hello is required…”, “incompatible major, wrong challenge…”, “duplicate in-flight IDs…”; `real-transport.test.ts`: “two clients handshake and read…” | Strengthened real-transport request/session ID assertions and cross-client session rejection; added “silent and partial-frame peers expire…” including half-open and EOF peers. | B5 scoped client enrollment. |
+| B. Competing owners | `process.test.ts`: “second executable cannot reach READY…”, “two spawned reclaimers…”; `storage.test.ts`: “owner rejects competitors…”; `ipc-server.test.ts`: ordered shutdown and post-bind failure cleanup. | Losing real process now demonstrably leaves winner's owner token and working IPC handshake intact. | Installer, autostart, and process supervision. |
+| C. Restart and durable state | `storage.test.ts`: WAL, migration persistence, rollback, incompatible history; `process.test.ts`: killed-process recovery and Unix signal shutdown; `ipc-server.test.ts`: post-bind rollback and Unix stale-socket protection; `ipc-protocol.test.ts`: stale in-process session rejection. | Added “replacement Companion process requires a fresh IPC session and preserves WAL migration state”: clean A stop, old socket close, same-root B start, old session rejected, fresh hello/read, persisted migration fixture/WAL checked. | Adapter authority binding, PendingInteraction recovery, relay reconnect, and source commit idempotency. |
+| D. VS Code client boundary | `real-transport.test.ts`: two production `CompanionClient`s with independent disposal and explicit process stop; `CompanionClient.test.ts`: bounded absence/timeouts/reconnect and stale socket events; `activation.test.ts`: nonfatal absence, mismatch, disposal, no background retry or eager Telegram runtime. | No duplicate VS Code test needed. | Bootstrap/enrollment/autostart UX. |
+| E. Architecture boundaries | `ipc-server.test.ts`: Named Pipe/UDS endpoint, no TCP; `ipc-protocol.test.ts`: unknown command rejected; root typecheck and package root boundaries. | Added `architecture.test.ts` guard for declared workspace dependency direction across domain, contracts, adapter SDK, Companion, VS Code, and Cloud. | Future agent/relay/mobile contract and authority guards. |
+
+- Finding A confirmed: framing bounded size but no server-side deadline for silent pre-`hello` or unfinished frames. A new real-transport test failed with `ERR_TEST_FAILURE` after 3,000 ms before the fix. `IpcProtocolSession` now has 10 s hello and 5 s incomplete-frame deadlines, configurable only as local test options; all end/stop paths clear timers. Unix protocol close uses `destroySoon()` so a half-open peer cannot retain the server socket after timeout; native shutdown stops sessions before pipe teardown. No new protocol method was added.
+- Finding B confirmed as a coverage gap: existing tests did not prove an old transport session fails across two real process epochs on one data root. The new process test passes without a restart production change. Its `restart_probe` migration/row is a storage test fixture, not a claim that production agent or PendingInteraction state exists.
+- Focused verification after implementation: `npm run companion:test` exit 0, 40 pass / 4 Windows skips / 0 fail. A later focused run after the half-open close correction also passed 40 / 4 / 0. `git diff --check` exit 0 before documentation edits. One intermediate focused run failed because the Windows native pipe dropped the optional protocol-error frame during immediate disconnect; the test was corrected to assert the security property, actual socket closure. A reviewer run overlapped the native-addon rebuild and saw `MODULE_NOT_FOUND` before behavior executed; the sequential root gate rebuilds the addon.
+- Prior root `npm run validate` on Windows x64 / Node v22.17.1: exit 0. Companion 40 pass / 4 platform skips / 0 fail; pinned VS Code 1.138.0 integration 164 pass; Cloud 73 pass. Builds, typechecks, and extension lint passed. `npm ci` was not run on a clean CI checkout in this local workspace.
+- Windows/Ubuntu CI: no M0.10 links or final-job results exist. The workflow only runs on `main` push or a PR to `main`; this branch is intentionally uncommitted/unpushed under the user's Git boundary. Local Ubuntu WSL has no `node` executable; Docker Linux engine is unavailable. Unix-specific tests and both final CI OS jobs remain unverified.
+- Earlier independent custom read-only reviews of the then-current diff: `spider_sense`: PASS after finding a Unix half-open timeout cleanup blocker, fixed with `destroySoon()` and a regression; it later checked and withdrew a separate EOF concern after verifying Node's accepted-socket default. `web_check`: PASS, real production seams and negative assertions. `watchtower`: PASS, architecture/scope/security. Those earlier follow-up reviews found no unresolved blocker. A reviewer saw a transient missing native addon while its build was running concurrently; the sequential root gate rebuilt it and passed.
+- Subsequent independent review attempt: native Codex delegation of `watchtower`, `spider_sense`, and `web_check` was unavailable, so none of those three ran or acquired a result in that attempt. A separate read-only review found a P1 Unix test defect: the half-open silent and partial-frame clients awaited `close` after server EOF. That review did not run repository tests. The test now awaits `end` on Unix, awaits native-pipe `close` on Windows, and explicitly destroys both clients afterward; a Windows-only intermediate version awaiting `end` on both platforms timed out before the transport-specific correction. A later focused Windows `npm run companion:test` passed 40 / 4 skips / 0 fail, and `git diff --check` passed. These corrections are not covered by the earlier reviewer PASS results.
+- 2026-11-03 final review corrections: the replacement-process test now checks the fresh `health.get` response type, request ID, and new session ID. `WORKPLAN_TODO.md` decoded as strict UTF-8 with no replacement characters or mojibake patterns; apparent corruption was display encoding, so no encoding rewrite was made. On Windows x64 / Node v22.17.1, `npm run companion:test` exited 0 (40 pass / 4 platform skips / 0 fail), root `npm run validate` exited 0 (Companion 40 / 4 skips / 0 fail, pinned VS Code 1.138.0 integration 164 pass, Cloud 73 pass; builds, typechecks, and lint passed), and `git diff --check` exited 0. Cloud tests warned that local Telegram secrets were absent. No current independent reviewer execution or Windows/Ubuntu CI job is claimed.
+- 2026-11-03 P2 independent review follow-up: the cross-client borrowed-session test previously checked disconnect but could miss a successful response sent before it. The test client now retains every complete decoded frame; after the unauthorized client handshakes, the test inspects all frames received through closure and permits only an optional `protocol.error` with `INVALID_SESSION`. No production code changed. On Windows x64 / Node v22.17.1, `npm run companion:test` exited 0 (40 pass / 4 platform skips / 0 fail) and root `npm run validate` exited 0 (Companion 40 / 4 skips / 0 fail, pinned VS Code 1.138.0 integration 164 pass, Cloud 73 pass; builds, typechecks, and lint passed). Fresh read-only P2 reviews by `watchtower`, `spider_sense`, and `web_check` each returned PASS; their findings are limited to this correction and relevant IPC seams, not a full re-review of all M0.10 changes. Ubuntu transport and both CI jobs remain unverified.
+- 2026-11-03 P2 restart-test review follow-up: the replacement-process test required an `INVALID_SESSION` frame even though Windows Named Pipe closure can precede delivery of that optional frame. It now registers a three-second close deadline before sending the stale request and inspects every complete frame recorded from that request through closure. Zero frames or one `protocol.error` with `INVALID_SESSION` pass; any successful or unexpected response fails. Fresh-session response assertions and SQLite WAL/migration checks remain. No production code changed. On Windows x64 / Node v22.17.1, `npm run companion:test` exited 0 (40 pass / 4 platform skips / 0 fail), root `npm run validate` exited 0 (Companion 40 / 4 skips / 0 fail, pinned VS Code 1.138.0 integration 164 pass, Cloud 73 pass; builds, typechecks, and lint passed), and `git diff --check` exited 0. Focused read-only reviews by `watchtower`, `spider_sense`, and `web_check` each returned PASS for this correction; they were not a full re-review of M0.10. Ubuntu transport and both CI OS jobs remain unverified.
+- Residual limits: package-manifest guard checks declared dependency direction; TypeScript package root boundaries cover normal imports, but it is not a full runtime import graph audit. No implemented agent, cloud relay, installation enrollment, or mobile authority is claimed.
+- Final gate decision: **M0.10 remains incomplete** until both required CI OS jobs pass. Leave `WORKPLAN.md` M0.10 unchecked.
 
 ## Research links
 

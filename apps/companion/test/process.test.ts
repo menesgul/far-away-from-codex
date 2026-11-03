@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createConnection } from 'node:net';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { localEndpoint } from '../src/ipc-endpoint.js';
+import { encodeIpcFrame, IpcFrameDecoder } from '../src/ipc-frame.js';
+import { IPC_V1 } from '../src/ipc-protocol.js';
+import { resolveCompanionPaths } from '../src/paths.js';
 
 const WAIT_LIMIT_MS = 5_000;
 const LIVENESS_WINDOW_MS = 750;
@@ -137,6 +142,39 @@ function spawnCompanion(sharedDataRoot?: string) {
   return { child, dataRoot, waitForReady, observeSustainedLiveness, waitForClose, cleanup, output: () => stdout, errors: () => stderr };
 }
 
+async function handshake(path: string): Promise<void> {
+  const socket = createConnection({ path });
+  const frames = new IpcFrameDecoder();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      };
+      const timer = setTimeout(() => finish(new Error('Companion handshake timed out')), WAIT_LIMIT_MS);
+      socket.on('error', finish);
+      socket.on('close', () => finish(new Error('Companion closed during handshake')));
+      socket.on('data', (chunk: Buffer) => {
+        try {
+          for (const frame of frames.push(chunk) as Record<string, unknown>[]) {
+            if (frame.type === 'hello.challenge') {
+              socket.write(encodeIpcFrame({ type: 'hello', version: IPC_V1, requestId: 'owner-probe',
+                supported: { min: IPC_V1, max: IPC_V1 }, challenge: frame.challenge }));
+            } else if (frame.type === 'hello.ack' && frame.requestId === 'owner-probe') {
+              finish();
+            } else {
+              finish(new Error(`Unexpected Companion handshake frame: ${String(frame.type)}`));
+            }
+          }
+        } catch (error) { finish(error as Error); }
+      });
+    });
+  } finally { socket.destroy(); }
+}
+
 test('built Companion launches without VS Code and remains alive at READY', async () => {
   const companion = spawnCompanion();
   try {
@@ -153,11 +191,21 @@ test('second executable cannot reach READY while the first owns the data root', 
   let second: ReturnType<typeof spawnCompanion> | undefined;
   try {
     await first.waitForReady();
+    const paths = resolveCompanionPaths({ testDataRoot: first.dataRoot });
+    const ownerBefore = new DatabaseSync(paths.ownership, { readOnly: true });
+    const tokenBefore = (ownerBefore.prepare('SELECT token FROM companion_owner WHERE slot = 1').get() as
+      { token: string }).token;
+    ownerBefore.close();
     second = spawnCompanion(first.dataRoot);
     const exit = await second.waitForClose();
     assert.notEqual(exit.code, 0);
     assert.doesNotMatch(second.output(), /Companion READY/);
     assert.match(second.errors(), /owned or locked|owned or owner liveness is uncertain/);
+    const ownerAfter = new DatabaseSync(paths.ownership, { readOnly: true });
+    assert.equal((ownerAfter.prepare('SELECT token FROM companion_owner WHERE slot = 1').get() as
+      { token: string }).token, tokenBefore);
+    ownerAfter.close();
+    await handshake(localEndpoint(first.dataRoot).path);
     await first.observeSustainedLiveness();
   } finally {
     await second?.cleanup();

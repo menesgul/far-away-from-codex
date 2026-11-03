@@ -19,15 +19,17 @@ const require = createRequire(import.meta.url);
 
 async function root() { return mkdtemp(join(tmpdir(), 'far-away-ipc-')); }
 
-function frameClient(path: string) {
-  const socket = createConnection({ path });
+function frameClient(path: string, allowHalfOpen = false) {
+  const socket = createConnection({ path, allowHalfOpen });
   // A fail-closed server can race a queued client write on Windows.
   socket.on('error', () => undefined);
   const decoder = new IpcFrameDecoder();
+  const received: Record<string, unknown>[] = [];
   const queued: Record<string, unknown>[] = [];
   const waiting: Array<(value: Record<string, unknown>) => void> = [];
   socket.on('data', (chunk: Buffer) => {
     for (const value of decoder.push(chunk) as Record<string, unknown>[]) {
+      received.push(value);
       const resolve = waiting.shift();
       if (resolve) resolve(value);
       else queued.push(value);
@@ -35,6 +37,7 @@ function frameClient(path: string) {
   });
   return {
     socket,
+    received,
     send: (message: object) => socket.write(encodeIpcFrame(message)),
     raw: (bytes: Buffer) => socket.write(bytes),
     next: async (): Promise<Record<string, unknown>> => {
@@ -137,9 +140,29 @@ test('real local transport serves two clients; malformed/disconnected peer is is
     assert.notEqual(a.sessionId, b.sessionId);
     first.send({ type: 'health.get', version: IPC_V1, requestId: 'a-health', sessionId: a.sessionId });
     second.send({ type: 'companion.status', version: IPC_V1, requestId: 'b-status', sessionId: b.sessionId });
-    assert.equal((await first.next()).type, 'health.get.result');
+    const health = await first.next();
+    assert.equal(health.type, 'health.get.result');
+    assert.equal(health.requestId, 'a-health');
+    assert.equal(health.sessionId, a.sessionId);
     const status = await second.next();
+    assert.equal(status.requestId, 'b-status');
+    assert.equal(status.sessionId, b.sessionId);
     assert.deepEqual(status.status, { state: 'ready', transport: endpoint.transport, protocol: IPC_V1 });
+
+    const unauthorized = frameClient(endpoint.path);
+    clients.push(unauthorized);
+    await establish(unauthorized);
+    const responseStart = unauthorized.received.length;
+    const unauthorizedClosed = new Promise<void>((resolve) => unauthorized.socket.once('close', () => resolve()));
+    unauthorized.send({ type: 'health.get', version: IPC_V1,
+      requestId: 'cross-client', sessionId: b.sessionId });
+    await unauthorizedClosed;
+    const unauthorizedResponses = unauthorized.received.slice(responseStart);
+    assert.ok(unauthorizedResponses.length <= 1);
+    for (const response of unauthorizedResponses) {
+      assert.equal(response.type, 'protocol.error');
+      assert.equal(response.code, 'INVALID_SESSION');
+    }
 
     const malformed = frameClient(endpoint.path);
     clients.push(malformed);
@@ -169,6 +192,193 @@ test('real local transport serves two clients; malformed/disconnected peer is is
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('silent and partial-frame peers expire without affecting a healthy IPC client', { timeout: 12000 }, async () => {
+  const directory = await root();
+  const app = new CompanionApplication({ paths: { testDataRoot: directory },
+    startIpc: (options) => {
+      const timed = { ...options, helloTimeoutMs: 2000, frameTimeoutMs: 2000 };
+      return LocalIpcServer.start(timed);
+    } });
+  const clients: ReturnType<typeof frameClient>[] = [];
+  try {
+    await app.start();
+    const healthy = frameClient(app.endpoint!.path);
+    clients.push(healthy);
+    const { sessionId } = await establish(healthy);
+    // A Unix half-open client sees EOF without closing its writable side;
+    // the Windows native pipe reports server disconnect through close.
+    const terminationEvent = process.platform === 'win32' ? 'close' : 'end';
+
+    const silent = frameClient(app.endpoint!.path, true);
+    clients.push(silent);
+    const silentTerminated = new Promise<void>((resolve) => silent.socket.once(terminationEvent, () => resolve()));
+    assert.equal((await silent.next()).type, 'hello.challenge');
+    await silentTerminated;
+    silent.close();
+
+    const partial = frameClient(app.endpoint!.path, true);
+    clients.push(partial);
+    await establish(partial);
+    const partialTerminated = new Promise<void>((resolve) => partial.socket.once(terminationEvent, () => resolve()));
+    partial.raw(Buffer.from([0, 0, 0, 20, 0x7b]));
+    await partialTerminated;
+    partial.close();
+
+    const ended = frameClient(app.endpoint!.path, true);
+    clients.push(ended);
+    const endedClosed = new Promise<void>((resolve) => ended.socket.once('close', () => resolve()));
+    assert.equal((await ended.next()).type, 'hello.challenge');
+    ended.socket.end();
+    await endedClosed;
+
+    healthy.send({ type: 'health.get', version: IPC_V1, requestId: 'after-stalls', sessionId });
+    const response = await healthy.next();
+    assert.equal(response.type, 'health.get.result');
+    assert.equal(response.requestId, 'after-stalls');
+    assert.equal(response.sessionId, sessionId);
+    assert.equal(app.state, 'ready');
+  } finally {
+    for (const client of clients) client.close();
+    await app.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('replacement Companion process requires a fresh IPC session and preserves WAL migration state',
+  { timeout: 15000 }, async () => {
+    const directory = await root();
+    const appModule = new URL('../src/application.js', import.meta.url).href;
+    const storageModule = new URL('../src/storage.js', import.meta.url).href;
+    const script = `
+      import { CompanionApplication } from ${JSON.stringify(appModule)};
+      import { CompanionStorage } from ${JSON.stringify(storageModule)};
+      const migration = { version: 1, name: 'restart_probe', up: (db) => {
+        db.exec('CREATE TABLE restart_probe (value TEXT NOT NULL)');
+        db.prepare('INSERT INTO restart_probe(value) VALUES (?)').run('durable');
+      } };
+      const app = new CompanionApplication({ paths: { testDataRoot: process.argv[1] },
+        startStorage: (options) => CompanionStorage.start({ ...options, migrations: [migration] }) });
+      try {
+        await app.start();
+        process.stdout.write('READY\\n');
+        let stopping = false;
+        process.stdin.on('data', async (data) => {
+          if (stopping || !data.toString().includes('STOP')) return;
+          stopping = true;
+          try { await app.stop(); process.stdout.write('STOPPED\\n', () => process.exit(0)); }
+          catch (error) { console.error(error); process.exit(1); }
+        });
+      } catch (error) { console.error(error); process.exit(1); }
+    `;
+    function launch() {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script, directory],
+        { stdio: ['pipe', 'pipe', 'pipe'] });
+      let output = '';
+      let errors = '';
+      child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+      child.stderr.on('data', (chunk: Buffer) => { errors += chunk.toString(); });
+      const waitFor = (marker: string) => new Promise<void>((resolve, reject) => {
+        const finish = (error?: Error) => {
+          clearTimeout(timer);
+          child.stdout.off('data', check);
+          child.off('exit', exited);
+          if (error) reject(error); else resolve();
+        };
+        const check = () => { if (output.includes(marker)) finish(); };
+        const exited = () => finish(new Error(`Companion exited before ${marker}: ${errors}`));
+        const timer = setTimeout(() => finish(new Error(`Companion timed out before ${marker}: ${errors}`)), 5000);
+        child.stdout.on('data', check);
+        child.once('exit', exited);
+        check();
+      });
+      const stop = async () => {
+        if (child.exitCode !== null) return;
+        child.stdin.write('STOP\n');
+        await waitFor('STOPPED');
+        if (child.exitCode === null) {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(`Companion exit timed out: ${errors}`)), 5000);
+            child.once('exit', (code) => {
+              clearTimeout(timer);
+              if (code === 0) resolve();
+              else reject(new Error(`Companion exited with code ${code}: ${errors}`));
+            });
+          });
+        }
+        assert.equal(child.exitCode, 0);
+      };
+      const cleanup = async () => {
+        if (child.exitCode === null) child.kill('SIGKILL');
+        if (child.exitCode === null) await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+      };
+      return { child, waitFor, stop, cleanup };
+    }
+    const clients: ReturnType<typeof frameClient>[] = [];
+    const first = launch();
+    let second: ReturnType<typeof launch> | undefined;
+    try {
+      await first.waitFor('READY');
+      const endpoint = localEndpoint(directory);
+      const old = frameClient(endpoint.path);
+      clients.push(old);
+      const a = await establish(old);
+      const oldClosed = new Promise<void>((resolve) => old.socket.once('close', () => resolve()));
+      await first.stop();
+      await oldClosed;
+      assert.equal(old.socket.destroyed, true);
+      await first.cleanup();
+
+      second = launch();
+      await second.waitFor('READY');
+      const stale = frameClient(endpoint.path);
+      clients.push(stale);
+      await establish(stale);
+      const responseStart = stale.received.length;
+      const staleClosed = new Promise<void>((resolve, reject) => {
+        const onClose = () => { clearTimeout(timer); resolve(); };
+        const timer = setTimeout(() => {
+          stale.socket.off('close', onClose);
+          reject(new Error('stale IPC connection close timed out'));
+        }, 3000);
+        stale.socket.once('close', onClose);
+      });
+      stale.send({ type: 'health.get', version: IPC_V1, requestId: 'old-session', sessionId: a.sessionId });
+      await staleClosed;
+      const staleResponses = stale.received.slice(responseStart);
+      assert.ok(staleResponses.length <= 1);
+      for (const response of staleResponses) {
+        assert.equal(response.type, 'protocol.error');
+        assert.equal(response.code, 'INVALID_SESSION');
+      }
+
+      const fresh = frameClient(endpoint.path);
+      clients.push(fresh);
+      const b = await establish(fresh);
+      assert.notEqual(b.challenge, a.challenge);
+      assert.notEqual(b.sessionId, a.sessionId);
+      fresh.send({ type: 'health.get', version: IPC_V1, requestId: 'new-session', sessionId: b.sessionId });
+      const health = await fresh.next();
+      assert.equal(health.type, 'health.get.result');
+      assert.equal(health.requestId, 'new-session');
+      assert.equal(health.sessionId, b.sessionId);
+
+      const db = new DatabaseSync(resolveCompanionPaths({ testDataRoot: directory }).database, { readOnly: true });
+      try {
+        assert.equal((db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode, 'wal');
+        assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 1);
+        assert.deepEqual(db.prepare('SELECT version, name FROM companion_migrations').all().map((row) => ({ ...row })),
+          [{ version: 1, name: 'restart_probe' }]);
+        assert.equal((db.prepare('SELECT value FROM restart_probe').get() as { value: string }).value, 'durable');
+      } finally { db.close(); }
+      await second.stop();
+    } finally {
+      for (const client of clients) client.close();
+      await second?.cleanup();
+      await first.cleanup();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
 test('IPC binds after owned SQLite bootstrap and closes before database/ownership', async () => {
   const directory = await root();

@@ -11,6 +11,8 @@ export interface LocalIpcOptions {
   readonly assertOwnershipHeld: () => Promise<void>;
   readonly runtimeState: () => CompanionRuntimeState;
   readonly onFatal?: () => void;
+  readonly helloTimeoutMs?: number;
+  readonly frameTimeoutMs?: number;
 }
 
 type NativePipe = typeof import('@far-away/windows-ipc-security');
@@ -70,7 +72,8 @@ export class LocalIpcServer {
   }
 
   private sessionOptions(): IpcSessionOptions {
-    return { transport: this.endpoint.transport, runtimeState: this.options.runtimeState };
+    return { transport: this.endpoint.transport, runtimeState: this.options.runtimeState,
+      helloTimeoutMs: this.options.helloTimeoutMs, frameTimeoutMs: this.options.frameTimeoutMs };
   }
 
   private async startWindows(): Promise<void> {
@@ -132,7 +135,7 @@ export class LocalIpcServer {
     let session: IpcProtocolSession;
     session = new IpcProtocolSession({
       send: (frame) => { socket.write(frame); },
-      close: () => { socket.end(); },
+      close: () => { socket.destroySoon(); },
     }, this.sessionOptions());
     this.unixClients.set(socket, session);
     socket.on('data', (chunk: Buffer) => session.receive(chunk));
@@ -150,6 +153,7 @@ export class LocalIpcServer {
   private async stopOnce(): Promise<void> {
     this.closed = true;
     if (this.nativeId !== undefined && this.native) {
+      for (const session of this.nativeClients.values()) session.stop();
       this.native.stop(this.nativeId);
       this.nativeId = undefined;
       this.nativeClients.clear();
