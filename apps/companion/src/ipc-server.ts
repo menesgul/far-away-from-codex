@@ -11,10 +11,14 @@ export interface LocalIpcOptions {
   readonly assertOwnershipHeld: () => Promise<void>;
   readonly runtimeState: () => CompanionRuntimeState;
   readonly onFatal?: () => void;
+  readonly helloTimeoutMs?: number;
+  readonly frameTimeoutMs?: number;
 }
 
 type NativePipe = typeof import('@far-away/windows-ipc-security');
 const require = createRequire(import.meta.url);
+const MAX_CLIENTS = 32;
+const MAX_OUTBOUND_BYTES = 256 * 1024;
 
 async function clearStaleSocket(endpoint: string): Promise<void> {
   let before;
@@ -70,7 +74,8 @@ export class LocalIpcServer {
   }
 
   private sessionOptions(): IpcSessionOptions {
-    return { transport: this.endpoint.transport, runtimeState: this.options.runtimeState };
+    return { transport: this.endpoint.transport, runtimeState: this.options.runtimeState,
+      helloTimeoutMs: this.options.helloTimeoutMs, frameTimeoutMs: this.options.frameTimeoutMs };
   }
 
   private async startWindows(): Promise<void> {
@@ -110,7 +115,8 @@ export class LocalIpcServer {
     }
     await this.options.assertOwnershipHeld();
     await clearStaleSocket(this.endpoint.path);
-    this.unix = createServer((socket) => this.acceptUnix(socket));
+    this.unix = createServer({ highWaterMark: MAX_OUTBOUND_BYTES },
+      (socket) => this.acceptUnix(socket));
     await new Promise<void>((resolve, reject) => {
       this.unix!.once('error', reject);
       this.unix!.listen({ path: this.endpoint.path, exclusive: true }, () => {
@@ -128,11 +134,17 @@ export class LocalIpcServer {
   }
 
   private acceptUnix(socket: Socket): void {
-    if (this.closed) { socket.destroy(); return; }
+    if (this.closed || this.unixClients.size >= MAX_CLIENTS) { socket.destroy(); return; }
     let session: IpcProtocolSession;
     session = new IpcProtocolSession({
-      send: (frame) => { socket.write(frame); },
-      close: () => { socket.end(); },
+      send: (frame) => {
+        if (frame.length > MAX_OUTBOUND_BYTES ||
+            socket.writableLength + frame.length > MAX_OUTBOUND_BYTES || !socket.write(frame)) {
+          socket.destroy();
+          throw new Error('Unix IPC outbound backpressure');
+        }
+      },
+      close: () => { socket.destroySoon(); },
     }, this.sessionOptions());
     this.unixClients.set(socket, session);
     socket.on('data', (chunk: Buffer) => session.receive(chunk));
@@ -150,6 +162,7 @@ export class LocalIpcServer {
   private async stopOnce(): Promise<void> {
     this.closed = true;
     if (this.nativeId !== undefined && this.native) {
+      for (const session of this.nativeClients.values()) session.stop();
       this.native.stop(this.nativeId);
       this.nativeId = undefined;
       this.nativeClients.clear();

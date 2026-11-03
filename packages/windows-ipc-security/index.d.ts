@@ -16,6 +16,11 @@ export function disconnect(serverId: number, clientId: number): void;
 /** Reclaim a client after its queued close event reaches JavaScript. */
 export function reap(serverId: number, clientId: number): void;
 /** Native transport counters for lifecycle and backpressure verification. */
-export function stats(serverId: number): { readonly clientCount: number; readonly queueFullCount: number };
+export function stats(serverId: number): {
+  readonly clientCount: number;
+  readonly outboundBytes: number;
+  readonly pendingWriteCount: number;
+  readonly queueFullCount: number;
+};
 export function security(serverId: number): PipeSecurityEvidence;
 export function stop(serverId: number): void;
