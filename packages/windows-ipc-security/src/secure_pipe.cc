@@ -5,7 +5,9 @@
 #include <node_api.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -14,6 +16,9 @@
 #include <vector>
 
 namespace {
+
+constexpr size_t kMaxOutboundBytes = 256 * 1024;
+constexpr size_t kMaxClients = 32;
 
 struct Event {
   std::string type;
@@ -24,8 +29,14 @@ struct Event {
 struct Client {
   uint32_t id;
   HANDLE pipe;
+  HANDLE closeEvent = nullptr;
   std::thread reader;
+  std::thread writer;
   std::mutex writeMutex;
+  std::condition_variable writeReady;
+  std::deque<std::vector<char>> writes;
+  size_t outboundBytes = 0;  // Includes the write currently in progress.
+  std::atomic_bool pendingWrite{false};  // An overlapped WriteFile awaits completion.
   std::atomic_bool closed{false};
   std::atomic_bool finished{false};
 };
@@ -207,8 +218,8 @@ void readClient(const std::shared_ptr<Server>& server, const std::shared_ptr<Cli
       if (!immediate) {
         const DWORD error = GetLastError();
         if (error != ERROR_IO_PENDING) break;
-        HANDLE waits[] = {server->stopEvent, ready};
-        if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) {
+        HANDLE waits[] = {server->stopEvent, client->closeEvent, ready};
+        if (WaitForMultipleObjects(3, waits, FALSE, INFINITE) != WAIT_OBJECT_0 + 2) {
           CancelIoEx(client->pipe, &operation);
           GetOverlappedResult(client->pipe, &operation, &count, TRUE);
           break;
@@ -219,18 +230,72 @@ void readClient(const std::shared_ptr<Server>& server, const std::shared_ptr<Cli
     }
     CloseHandle(ready);
   }
+  client->closed = true;
+  SetEvent(client->closeEvent);
+  CancelIoEx(client->pipe, nullptr);
+  client->writeReady.notify_all();
   client->finished = true;
   emitControl(server, "close", client->id);
   napi_release_threadsafe_function(server->events, napi_tsfn_release);
 }
 
+void writeClient(const std::shared_ptr<Client>& client) {
+  for (;;) {
+    std::vector<char> frame;
+    {
+      std::unique_lock<std::mutex> lock(client->writeMutex);
+      client->writeReady.wait(lock, [&] { return client->closed || !client->writes.empty(); });
+      if (client->closed) break;
+      frame = std::move(client->writes.front());
+      client->writes.pop_front();
+    }
+    HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ready) { client->closed = true; break; }
+    OVERLAPPED operation{};
+    operation.hEvent = ready;
+    DWORD written = 0;
+    bool okay = WriteFile(client->pipe, frame.data(), static_cast<DWORD>(frame.size()),
+                          &written, &operation) != 0;
+    if (!okay && GetLastError() == ERROR_IO_PENDING) {
+      client->pendingWrite = true;
+      HANDLE waits[] = {client->closeEvent, ready};
+      if (WaitForMultipleObjects(2, waits, FALSE, 1000) == WAIT_OBJECT_0 + 1) {
+        okay = GetOverlappedResult(client->pipe, &operation, &written, FALSE) != 0;
+      } else {
+        CancelIoEx(client->pipe, &operation);
+        // The stack OVERLAPPED, frame and event must outlive cancellation.
+        GetOverlappedResult(client->pipe, &operation, &written, TRUE);
+      }
+      client->pendingWrite = false;
+    }
+    CloseHandle(ready);
+    {
+      std::lock_guard<std::mutex> lock(client->writeMutex);
+      client->outboundBytes -= frame.size();
+    }
+    if (!okay || written != frame.size()) { client->closed = true; break; }
+  }
+  {
+    std::lock_guard<std::mutex> lock(client->writeMutex);
+    client->writes.clear();
+    client->outboundBytes = 0;
+  }
+  client->closed = true;
+  SetEvent(client->closeEvent);
+  CancelIoEx(client->pipe, nullptr);
+  client->writeReady.notify_all();
+}
+
 void finishClient(const std::shared_ptr<Client>& client) {
   client->closed = true;
+  SetEvent(client->closeEvent);
   CancelIoEx(client->pipe, nullptr);
+  client->writeReady.notify_all();
   if (client->reader.joinable()) client->reader.join();
-  std::lock_guard<std::mutex> writeLock(client->writeMutex);
+  if (client->writer.joinable()) client->writer.join();
   DisconnectNamedPipe(client->pipe);
   CloseHandle(client->pipe);
+  CloseHandle(client->closeEvent);
 }
 
 void acceptClients(const std::shared_ptr<Server>& server) {
@@ -269,10 +334,27 @@ void acceptClients(const std::shared_ptr<Server>& server) {
       emitControl(server, "fatal", 0);
       break;
     }
-    auto client = std::make_shared<Client>();
+    bool atCapacity;
     {
       std::lock_guard<std::mutex> lock(server->mutex);
       server->pendingPipe = next;
+      atCapacity = server->clients.size() >= kMaxClients;
+    }
+    if (atCapacity) {
+      DisconnectNamedPipe(pipe);
+      CloseHandle(pipe);
+      continue;
+    }
+    auto client = std::make_shared<Client>();
+    client->closeEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!client->closeEvent) {
+      DisconnectNamedPipe(pipe);
+      CloseHandle(pipe);
+      emitControl(server, "fatal", 0);
+      break;
+    }
+    {
+      std::lock_guard<std::mutex> lock(server->mutex);
       client->id = server->nextClientId++;
       client->pipe = pipe;
       server->clients.emplace(client->id, client);
@@ -294,6 +376,7 @@ void acceptClients(const std::shared_ptr<Server>& server) {
       finishClient(client);
       continue;
     }
+    client->writer = std::thread(writeClient, client);
     client->reader = std::thread(readClient, server, client);
   }
   napi_release_threadsafe_function(server->events, napi_tsfn_release);
@@ -392,30 +475,27 @@ napi_value write(napi_env env, napi_callback_info info) {
   void* bytes;
   size_t length;
   napi_get_buffer_info(env, args[2], &bytes, &length);
+  if (length == 0) {
+    throwError(env, "Named Pipe write requires a nonempty frame");
+    return nullptr;
+  }
   std::lock_guard<std::mutex> writeLock(client->writeMutex);
   if (client->closed || client->finished || server->closing) {
     throwError(env, "Named Pipe client is closed");
     return nullptr;
   }
-  HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-  if (!ready) { throwError(env, windowsError("Named Pipe write event")); return nullptr; }
-  OVERLAPPED operation{};
-  operation.hEvent = ready;
-  DWORD written = 0;
-  bool okay = WriteFile(client->pipe, bytes, static_cast<DWORD>(length), &written, &operation) != 0;
-  if (!okay && GetLastError() == ERROR_IO_PENDING) {
-    if (WaitForSingleObject(ready, 1000) == WAIT_OBJECT_0) {
-      okay = GetOverlappedResult(client->pipe, &operation, &written, FALSE) != 0;
-    } else {
-      CancelIoEx(client->pipe, &operation);
-      GetOverlappedResult(client->pipe, &operation, &written, TRUE);
-    }
-  }
-  CloseHandle(ready);
-  if (!okay || written != length) {
-    throwError(env, "Named Pipe write failed or timed out");
+  if (length > kMaxOutboundBytes || client->outboundBytes > kMaxOutboundBytes - length) {
+    client->closed = true;
+    SetEvent(client->closeEvent);
+    CancelIoEx(client->pipe, nullptr);
+    client->writeReady.notify_all();
+    throwError(env, "Named Pipe outbound budget exceeded");
     return nullptr;
   }
+  const auto* first = static_cast<const char*>(bytes);
+  client->writes.emplace_back(first, first + length);
+  client->outboundBytes += length;
+  client->writeReady.notify_one();
   napi_value result;
   napi_get_undefined(env, &result);
   return result;
@@ -442,7 +522,9 @@ napi_value disconnect(napi_env env, napi_callback_info info) {
     // waiting to enqueue its close event into the same bounded TSFN queue.
     if (client) {
       client->closed = true;
+      SetEvent(client->closeEvent);
       CancelIoEx(client->pipe, nullptr);
+      client->writeReady.notify_all();
     }
   }
   napi_value result;
@@ -484,15 +566,26 @@ napi_value stats(napi_env env, napi_callback_info info) {
   uint32_t id;
   auto server = argc == 1 && getUint(env, arg, id) ? getServer(id) : nullptr;
   if (!server) { throwError(env, "Named Pipe server is closed"); return nullptr; }
-  uint32_t clients;
+  std::vector<std::shared_ptr<Client>> clients;
   {
     std::lock_guard<std::mutex> lock(server->mutex);
-    clients = static_cast<uint32_t>(server->clients.size());
+    for (const auto& pair : server->clients) clients.push_back(pair.second);
+  }
+  uint32_t outboundBytes = 0;
+  uint32_t pendingWriteCount = 0;
+  for (const auto& client : clients) {
+    std::lock_guard<std::mutex> lock(client->writeMutex);
+    outboundBytes += static_cast<uint32_t>(client->outboundBytes);
+    if (client->pendingWrite) ++pendingWriteCount;
   }
   napi_value object, value;
   napi_create_object(env, &object);
-  napi_create_uint32(env, clients, &value);
+  napi_create_uint32(env, static_cast<uint32_t>(clients.size()), &value);
   napi_set_named_property(env, object, "clientCount", value);
+  napi_create_uint32(env, outboundBytes, &value);
+  napi_set_named_property(env, object, "outboundBytes", value);
+  napi_create_uint32(env, pendingWriteCount, &value);
+  napi_set_named_property(env, object, "pendingWriteCount", value);
   napi_create_uint32(env, server->queueFullCount.load(), &value);
   napi_set_named_property(env, object, "queueFullCount", value);
   return object;

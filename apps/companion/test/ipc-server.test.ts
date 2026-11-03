@@ -483,6 +483,195 @@ test('Windows bounded queue pressure and malformed close leave another real clie
     }
   });
 
+test('nonreading Unix peer exhausts its outbound budget without delaying a healthy client',
+  { skip: process.platform === 'win32' ? 'Unix UDS requires Unix' : undefined,
+    timeout: 12000 }, async () => {
+    const directory = await root();
+    const app = new CompanionApplication({ paths: { testDataRoot: directory } });
+    let slow: Socket | undefined;
+    let healthy: ReturnType<typeof frameClient> | undefined;
+    try {
+      await app.start();
+      healthy = frameClient(app.endpoint!.path);
+      const { sessionId } = await establish(healthy);
+      const ipc = (app as unknown as { ipc: {
+        unixClients: Map<Socket, { connection: { send(frame: Buffer): void } }> } }).ipc;
+      await until(() => ipc.unixClients.size === 1);
+      const admitted = new Set(ipc.unixClients.keys());
+      slow = createConnection({ path: app.endpoint!.path });
+      slow.on('error', () => undefined);
+      slow.pause();
+      await until(() => ipc.unixClients.size === 2);
+      const [serverSocket, slowSession] = [...ipc.unixClients.entries()]
+        .find(([socket]) => !admitted.has(socket))!;
+      assert.equal(serverSocket.writableHighWaterMark, 256 * 1024);
+      const frame = Buffer.alloc(16 * 1024);
+      slowSession.connection.send(frame);
+      assert.equal(ipc.unixClients.size, 2, 'one sub-budget frame must not disconnect');
+      let rejected = false;
+      let maxPending = 0;
+      for (let i = 0; i < 2048; i++) {
+        maxPending = Math.max(maxPending, serverSocket.writableLength);
+        try { slowSession.connection.send(frame); }
+        catch { rejected = true; break; }
+      }
+      assert.equal(rejected, true, 'nonreading peer must reach outbound backpressure');
+      assert.ok(maxPending >= 192 * 1024, 'backpressure must permit the configured budget');
+      healthy.send({ type: 'health.get', version: IPC_V1,
+        requestId: 'after-slow-unix', sessionId });
+      assert.equal((await healthy.next()).type, 'health.get.result');
+      await until(() => !ipc.unixClients.has(serverSocket));
+      assert.deepEqual(new Set(ipc.unixClients.keys()), admitted,
+        'only the slow server-side socket must be disconnected');
+    } finally {
+      slow?.destroy();
+      healthy?.close();
+      await app.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+test('nonreading Windows peer has a bounded native FIFO and shutdown cancels pending writes',
+  { skip: process.platform !== 'win32' ? 'Windows Named Pipe requires Windows' : undefined,
+    timeout: 12000 }, async () => {
+    const directory = await root();
+    const app = new CompanionApplication({ paths: { testDataRoot: directory } });
+    let slow: Socket | undefined;
+    let healthy: ReturnType<typeof frameClient> | undefined;
+    try {
+      await app.start();
+      healthy = frameClient(app.endpoint!.path);
+      const { sessionId } = await establish(healthy);
+      const native = require('@far-away/windows-ipc-security') as typeof import('@far-away/windows-ipc-security');
+      const ipc = (app as unknown as { ipc: { nativeId: number;
+        nativeClients: Map<number, unknown> } }).ipc;
+      const known = new Set(ipc.nativeClients.keys());
+      slow = createConnection({ path: app.endpoint!.path });
+      slow.on('error', () => undefined);
+      slow.pause();
+      await until(() => ipc.nativeClients.size === 2);
+      const slowId = [...ipc.nativeClients.keys()].find((id) => !known.has(id))!;
+      const frame = Buffer.alloc(16 * 1024, 0x41);
+      let rejected = false;
+      for (let i = 0; i < 2048; i++) {
+        try { native.write(ipc.nativeId, slowId, frame); }
+        catch { rejected = true; break; }
+      }
+      assert.equal(rejected, true, 'native writer queue must reject over-budget output');
+      healthy.send({ type: 'health.get', version: IPC_V1,
+        requestId: 'after-slow-windows', sessionId });
+      assert.equal((await healthy.next()).type, 'health.get.result');
+      await until(() => windowsStats(app).clientCount === 1);
+      // Repeat with a fresh peer; stop while its writer has queued data.
+      const pending = createConnection({ path: app.endpoint!.path });
+      pending.on('error', () => undefined);
+      pending.pause();
+      try {
+        await until(() => ipc.nativeClients.size === 2);
+        const pendingId = [...ipc.nativeClients.keys()].find((id) => !known.has(id))!;
+        for (let i = 0; i < 15; i++) native.write(ipc.nativeId, pendingId, frame);
+        await until(() => windowsStats(app).pendingWriteCount === 1);
+        assert.ok(windowsStats(app).outboundBytes > 0);
+        await app.stop();
+        assert.equal(app.state, 'stopped');
+      } finally { pending.destroy(); }
+    } finally {
+      slow?.destroy();
+      healthy?.close();
+      await app.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+test('Windows native disconnect reaps a peer that remains connected and does not read',
+  { skip: process.platform !== 'win32' ? 'Windows Named Pipe requires Windows' : undefined }, async () => {
+    const directory = await root();
+    const app = new CompanionApplication({ paths: { testDataRoot: directory } });
+    let peer: Socket | undefined;
+    try {
+      await app.start();
+      const native = require('@far-away/windows-ipc-security') as typeof import('@far-away/windows-ipc-security');
+      const ipc = (app as unknown as { ipc: { nativeId: number;
+        nativeClients: Map<number, unknown> } }).ipc;
+      peer = createConnection({ path: app.endpoint!.path });
+      peer.on('error', () => undefined);
+      peer.pause();
+      await until(() => ipc.nativeClients.size === 1);
+      native.disconnect(ipc.nativeId, [...ipc.nativeClients.keys()][0]);
+      await until(() => windowsStats(app).clientCount === 0);
+      assert.equal(app.state, 'ready');
+    } finally {
+      peer?.destroy();
+      await app.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+test('Windows native writer preserves queued frame order on a real pipe',
+  { skip: process.platform !== 'win32' ? 'Windows Named Pipe requires Windows' : undefined }, async () => {
+    const directory = await root();
+    const app = new CompanionApplication({ paths: { testDataRoot: directory } });
+    let client: ReturnType<typeof frameClient> | undefined;
+    try {
+      await app.start();
+      const native = require('@far-away/windows-ipc-security') as typeof import('@far-away/windows-ipc-security');
+      const ipc = (app as unknown as { ipc: { nativeId: number;
+        nativeClients: Map<number, unknown> } }).ipc;
+      client = frameClient(app.endpoint!.path);
+      assert.equal((await client.next()).type, 'hello.challenge');
+      await until(() => ipc.nativeClients.size === 1);
+      const clientId = [...ipc.nativeClients.keys()][0];
+      for (let i = 0; i < 64; i++) {
+        native.write(ipc.nativeId, clientId, encodeIpcFrame({ sequence: i }));
+      }
+      for (let i = 0; i < 64; i++) {
+        assert.deepEqual(await client.next(), { sequence: i });
+      }
+    } finally {
+      client?.close();
+      await app.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+test('IPC accepts at most 32 clients and keeps an admitted client responsive',
+  { timeout: 12000 }, async () => {
+    const directory = await root();
+    const app = new CompanionApplication({ paths: { testDataRoot: directory } });
+    const admitted: ReturnType<typeof frameClient>[] = [];
+    let healthy: ReturnType<typeof frameClient> | undefined;
+    try {
+      await app.start();
+      healthy = frameClient(app.endpoint!.path);
+      const { sessionId } = await establish(healthy);
+      for (let i = 0; i < 31; i++) {
+        const client = frameClient(app.endpoint!.path);
+        admitted.push(client);
+        await establish(client);
+      }
+      const count = () => process.platform === 'win32' ? windowsStats(app).clientCount :
+        (app as unknown as { ipc: { unixClients: Map<Socket, unknown> } }).ipc.unixClients.size;
+      await until(() => count() === 32);
+      const excess = createConnection({ path: app.endpoint!.path });
+      excess.on('error', () => undefined);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('excess client was not closed')), 3000);
+          excess.once('close', () => { clearTimeout(timer); resolve(); });
+        });
+        assert.equal(count(), 32);
+        healthy.send({ type: 'health.get', version: IPC_V1,
+          requestId: 'at-capacity', sessionId });
+        assert.equal((await healthy.next()).type, 'health.get.result');
+      } finally { excess.destroy(); }
+    } finally {
+      for (const client of admitted) client.close();
+      healthy?.close();
+      await app.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
 test('Windows clean disconnect reclaims native client without a later connection',
   { skip: process.platform !== 'win32' ? 'Windows native lifecycle requires Windows' : undefined }, async () => {
     const directory = await root();

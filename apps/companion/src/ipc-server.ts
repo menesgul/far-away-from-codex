@@ -17,6 +17,8 @@ export interface LocalIpcOptions {
 
 type NativePipe = typeof import('@far-away/windows-ipc-security');
 const require = createRequire(import.meta.url);
+const MAX_CLIENTS = 32;
+const MAX_OUTBOUND_BYTES = 256 * 1024;
 
 async function clearStaleSocket(endpoint: string): Promise<void> {
   let before;
@@ -113,7 +115,8 @@ export class LocalIpcServer {
     }
     await this.options.assertOwnershipHeld();
     await clearStaleSocket(this.endpoint.path);
-    this.unix = createServer((socket) => this.acceptUnix(socket));
+    this.unix = createServer({ highWaterMark: MAX_OUTBOUND_BYTES },
+      (socket) => this.acceptUnix(socket));
     await new Promise<void>((resolve, reject) => {
       this.unix!.once('error', reject);
       this.unix!.listen({ path: this.endpoint.path, exclusive: true }, () => {
@@ -131,10 +134,16 @@ export class LocalIpcServer {
   }
 
   private acceptUnix(socket: Socket): void {
-    if (this.closed) { socket.destroy(); return; }
+    if (this.closed || this.unixClients.size >= MAX_CLIENTS) { socket.destroy(); return; }
     let session: IpcProtocolSession;
     session = new IpcProtocolSession({
-      send: (frame) => { socket.write(frame); },
+      send: (frame) => {
+        if (frame.length > MAX_OUTBOUND_BYTES ||
+            socket.writableLength + frame.length > MAX_OUTBOUND_BYTES || !socket.write(frame)) {
+          socket.destroy();
+          throw new Error('Unix IPC outbound backpressure');
+        }
+      },
       close: () => { socket.destroySoon(); },
     }, this.sessionOptions());
     this.unixClients.set(socket, session);
