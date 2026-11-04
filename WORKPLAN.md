@@ -165,7 +165,7 @@ Only one step is expanded in `WORKPLAN_TODO.md` at a time.
 - [x] **M0.7 — Implement Minimal Local IPC Protocol**
 - [x] **M0.8 — Add VS Code CompanionClient**
 - [x] **M0.9 — Make VS Code Activation Lightweight and Companion-Aware**
-- [ ] **M0.10 — Add Multi-Client, Restart & Architecture-Boundary Tests**
+- [x] **M0.10 — Add Multi-Client, Restart & Architecture-Boundary Tests**
 - [ ] **M0.11 — Remove Obsolete Root Scaffolding / Normalize Tooling**
 - [ ] **M0.12 — Full Regression & Architecture Audit**
 

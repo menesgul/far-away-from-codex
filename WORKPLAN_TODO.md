@@ -6,7 +6,7 @@
 
 ## Status
 
-**IN PROGRESS — locally implemented and validated; focused review passed; both CI OS jobs remain unverified.**
+**COMPLETE — merged via PR #11; Windows 2022 and Ubuntu 24.04 CI passed.**
 
 Canonical baseline: merged `main` at the start of execution; record its exact SHA in Completion Evidence. M0.9 is checked complete in `WORKPLAN.md`. Its former executable plan and review log are archived at `docs/milestones/M0.9.md`. This document does not authorize implementation of future milestones.
 
@@ -211,9 +211,9 @@ Stop and report before continuing if:
 - [x] VS Code clients remain lifecycle-independent and non-authoritative.
 - [x] Narrow architecture guards protect actual M0 boundaries.
 - [x] Existing Telegram/VS Code/Cloud regressions pass.
-- [ ] Full local validation and both CI OS jobs pass with skip accounting.
+- [x] Full local validation and both CI OS jobs pass with skip accounting.
 - [x] Independent review of the latest corrections has no unresolved blocking findings.
-- [ ] `WORKPLAN.md` M0.10 checked only after evidence/review.
+- [x] `WORKPLAN.md` M0.10 checked only after evidence/review.
 
 ## Completion Evidence
 
@@ -261,6 +261,36 @@ Stop and report before continuing if:
 - All 31 additional clients in the 32-client cap regression now complete `hello` before the cap assertion. The test no longer depends on the 10-second pre-hello deadline. The 256 KiB and 32-client provisional production limits are unchanged.
 - Windows x64 / Node v22.17.1: `npm run windows-ipc-security:build` exited 0; `npm run companion:test` exited 0 (44 passed, 5 Windows platform skips, 0 failed); root `npm run validate` exited 0 (Companion 44 pass / 5 skips / 0 fail, pinned VS Code 1.138.0 integration 164 pass, Cloud 73 pass; builds, typechecks, lint passed). Cloud tests warned that local Telegram secrets were absent. `git diff --check` exited 0 after these edits. The Unix real-transport test is skipped on Windows; local Ubuntu WSL still has no verified Node runtime, and Windows/Ubuntu CI jobs remain unverified.
 - Focused read-only reviews of these corrections by `spider_sense` (native lifecycle), `web_check` (test behavior), and `watchtower` (scope/security) each returned PASS. `watchtower` initially raised a writer `CreateEventW` failure concern, then withdrew it after confirming that `break` enters the common cancellation epilogue. No unresolved blocker was reported. M0.10 remains incomplete and unchecked.
+
+
+### M0.10 Final Closure — 2026-11-04
+
+**Status: COMPLETE**
+
+- PR: [#11 — Multi-client restart and IPC backpressure](https://github.com/menesgul/far-away-from-codex/pull/11)
+- Merge commit: `e8565c4`
+- Multi-client/restart commit: `7187de8`
+- P1 outbound backpressure commit: `0596949`
+- Windows Server 2022 and Ubuntu 24.04 required CI checks passed.
+- Ubuntu Companion: 43 passed, 6 platform skips, 0 failures.
+- Windows local Companion: 44 passed, 5 platform skips, 0 failures.
+- VS Code integration: 164 passed.
+- Cloud: 73 passed.
+- Unix nonreading-peer backpressure and 32-client admission tests explicitly passed on Ubuntu.
+- Independent IPC implementation and regression reviews completed with no remaining M0.10 blockers.
+
+**Residual IPC hardening findings — OPEN**
+
+- P2: Mutual authentication, client enrollment and scoped authorization before privileged IPC.
+- P2: Production-safe structured observability and resource diagnostics.
+- P2: Cross-OS-principal endpoint access-control tests.
+- P2: Review remaining global connection and idle-session resource limits; the 32-client admission cap is implemented.
+- P3: Unix stale-socket pathname TOCTOU hardening.
+- P3: Diagnostic-hook exception safety during resource cleanup.
+
+These findings remain open and are not claimed as M0.10 completion evidence. The next milestone's executable plan will be prepared after the remaining IPC hardening work is resolved.
+
+**Closure decision:** M0.10 is complete. No agent, relay, mobile or privileged IPC functionality is claimed.
 
 ## Research links
 
